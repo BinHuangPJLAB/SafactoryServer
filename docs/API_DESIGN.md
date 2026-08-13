@@ -4,8 +4,8 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v1.0 |
-| 更新日期 | 2026-08-12 |
+| 文档版本 | v1.1 |
+| 更新日期 | 2026-08-13 |
 | Base Path | `/v1` |
 
 ## 1. 设计范围
@@ -35,17 +35,7 @@
 - 所有列表采用 cursor pagination；
 - 字段默认使用 `snake_case`。
 
-### 2.2 认证与授权
-
-示例使用 Bearer Token：
-
-```http
-Authorization: Bearer <token>
-```
-
-服务端必须从认证上下文解析 owner/project。请求体中的 owner 信息不能覆盖认证上下文。
-
-### 2.3 请求追踪
+### 2.2 请求追踪
 
 客户端可传：
 
@@ -61,7 +51,7 @@ X-Request-ID: req_01K...
 
 错误响应体也包含该 ID。
 
-### 2.4 幂等
+### 2.3 幂等
 
 创建 Job 必须传：
 
@@ -71,13 +61,13 @@ Idempotency-Key: 0f935f4e-8be0-42d7-b4fb-e5e7b080bbd3
 
 规则：
 
-- 幂等范围为当前 owner/project；
+- 幂等范围为当前 API 服务；
 - 相同 key 和相同规范化请求返回同一 Job；
 - 相同 key 和不同请求返回 `409 IDEMPOTENCY_KEY_REUSED`；
 - key 建议至少保存 24 小时；
 - pause、resume、cancel 和 delete 依据资源当前状态天然幂等，不要求 key。
 
-### 2.5 成功响应
+### 2.4 成功响应
 
 单资源响应直接返回资源对象，不增加 `data` 包装：
 
@@ -98,7 +88,7 @@ Idempotency-Key: 0f935f4e-8be0-42d7-b4fb-e5e7b080bbd3
 }
 ```
 
-### 2.6 错误响应
+### 2.5 错误响应
 
 统一格式：
 
@@ -120,7 +110,7 @@ Idempotency-Key: 0f935f4e-8be0-42d7-b4fb-e5e7b080bbd3
 
 `message` 用于人类排障，客户端逻辑必须依赖稳定的 `code`。
 
-### 2.7 常用 HTTP 状态码
+### 2.6 常用 HTTP 状态码
 
 | 状态码 | 使用场景 |
 |---:|---|
@@ -128,8 +118,6 @@ Idempotency-Key: 0f935f4e-8be0-42d7-b4fb-e5e7b080bbd3
 | 202 | 创建或控制请求已接受，状态仍在异步变化。 |
 | 204 | 删除已完成或资源已经处于逻辑删除状态。 |
 | 400 | JSON、字段格式或查询参数错误。 |
-| 401 | 未认证。 |
-| 403 | 无资源权限或无权使用 profile。 |
 | 404 | Job/Task/artifact 不存在或已逻辑删除。 |
 | 409 | 状态冲突或幂等键冲突。 |
 | 413 | 请求或 inline task 数据过大。 |
@@ -263,7 +251,6 @@ Idempotency-Key: 0f935f4e-8be0-42d7-b4fb-e5e7b080bbd3
 #### Headers
 
 ```http
-Authorization: Bearer <token>
 Content-Type: application/json
 Idempotency-Key: 0f935f4e-8be0-42d7-b4fb-e5e7b080bbd3
 ```
@@ -309,7 +296,7 @@ Idempotency-Key: 0f935f4e-8be0-42d7-b4fb-e5e7b080bbd3
 | 字段 | 必需 | 规则 |
 |---|---:|---|
 | `name` | 否 | 1～128 字符，仅用于展示。 |
-| `profile.id` | 是 | 必须是当前项目有权使用的 profile。 |
+| `profile.id` | 是 | 必须是服务端已注册且可用的 profile。 |
 | `profile.version` | 否 | 省略时解析当前默认版本，创建后固定。 |
 | `runtime` | 是 | `docker`、`rjob`、`sandbox`，且必须被 profile 允许。 |
 | `model` | 是 | Gateway route key，不允许 URL。 |
@@ -319,7 +306,7 @@ Idempotency-Key: 0f935f4e-8be0-42d7-b4fb-e5e7b080bbd3
 | `execution.max_steps` | 否 | 正整数，不能超过 profile 上限。 |
 | `execution.timeout_seconds` | 否 | Job 总超时。 |
 | `execution.task_timeout_seconds` | 否 | 单 Task 超时。 |
-| `execution.pool_size` | 否 | 默认 1，不能超过项目/profile 配额。 |
+| `execution.pool_size` | 否 | 默认 1，不能超过服务端或 profile 限额。 |
 | `execution.max_workers` | 否 | 不得大于 `pool_size`。 |
 | `execution.evaluation_enabled` | 否 | 默认由 profile 决定。 |
 | `labels` | 否 | 最多 20 个键值，键和值长度受限。 |
@@ -385,9 +372,9 @@ Retry-After: 2
 同步校验失败不创建 Job：
 
 - JSON/schema；
-- profile 可访问性；
+- profile 存在性和可用状态；
 - runtime 和显式参数范围；
-- owner/project 基础配额；
+- 服务端基础配额；
 - idempotency key。
 
 异步校验失败会创建 Job 后转入 `failed`：
@@ -441,7 +428,7 @@ Retry-After: 2
 }
 ```
 
-逻辑删除的 Job 默认不返回。管理员接口如需查询已删除资源，应使用独立权限和参数，不属于基础 API。
+逻辑删除的 Job 默认不返回。查询已删除资源不属于基础 API。
 
 ## 6. 查询 Job 运行状态
 
@@ -765,7 +752,7 @@ Retry-After: 2
 | `limit` | 50 | 本页 Task result 数，1～100。 |
 | `cursor` | 无 | Task result cursor。 |
 | `status` | 无 | 只返回指定 Task 状态，可重复。 |
-| `include_input` | false | 是否返回脱敏后的 Task 输入。需要额外权限。 |
+| `include_input` | false | 是否返回脱敏后的 Task 输入。 |
 
 #### Response：运行中部分结果
 
@@ -887,7 +874,7 @@ HTTP/1.1 409 Conflict
 
 | 参数 | 默认 | 说明 |
 |---|---:|---|
-| `view` | `normalized` | `normalized` 或拥有额外权限时的 `raw`。 |
+| `view` | `normalized` | v1 仅支持 `normalized`。 |
 | `limit` | 100 | 轨迹 row/step 数。 |
 | `cursor` | 无 | cursor。 |
 
@@ -956,12 +943,11 @@ HTTP/1.1 409 Conflict
 
 实现方式二选一：
 
-1. 小文件由 API 鉴权后流式返回；
+1. 小文件由 API 流式返回；
 2. 对象存储文件返回 `302 Found` 到短时有效的签名 URL。
 
 必须支持：
 
-- owner/project 权限校验；
 - `Content-Type`、`Content-Length`；
 - 安全的 `Content-Disposition`；
 - checksum；
@@ -1077,9 +1063,7 @@ pause、resume、cancel 和 delete 必须：
 | Error code | HTTP | Retryable | 说明 |
 |---|---:|---:|---|
 | `INVALID_REQUEST` | 400 | 否 | 请求格式错误或缺少必需 header。 |
-| `AUTHENTICATION_REQUIRED` | 401 | 否 | 未认证。 |
-| `PERMISSION_DENIED` | 403 | 否 | 无权限。 |
-| `PROFILE_NOT_FOUND` | 404 | 否 | Profile 不存在或不可见。 |
+| `PROFILE_NOT_FOUND` | 404 | 否 | Profile 不存在或未启用。 |
 | `JOB_NOT_FOUND` | 404 | 否 | Job 不存在或已删除。 |
 | `TASK_NOT_FOUND` | 404 | 否 | Task 不存在。 |
 | `ARTIFACT_NOT_FOUND` | 404 | 否 | Artifact 不存在或已过期。 |
