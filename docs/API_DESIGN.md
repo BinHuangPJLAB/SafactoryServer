@@ -4,7 +4,7 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v2.0 |
+| 文档版本 | v2.1 |
 | 更新日期 | 2026-08-17 |
 | Base Path | `/v1` |
 
@@ -14,9 +14,9 @@
 
 1. 查询基座支持的模型；
 2. 使用 `model_id` 和 `range_id` 创建 Job；
-3. 使用 `job_id` 查询唯一的 `session_id`；
-4. 使用 `session_id` 查询运行结果（得分）；
-5. 使用 `session_id` 查询轨迹 step 数及 `step_id`；
+3. 使用 `job_id` 查询 `session_id` 列表；
+4. 使用列表中的 `session_id` 查询运行结果（得分）；
+5. 使用列表中的 `session_id` 查询轨迹 step 数及 `step_id`；
 6. 使用 `session_id` 和 `step_id` 查询某一步的具体轨迹。
 
 不在本文中定义 Job 列表、Task、暂停、恢复、取消、删除、Artifact、日志、事件推送和靶场模板管理接口。
@@ -24,11 +24,11 @@
 ### 1.1 核心约束
 
 - 一个 Job 只运行一个靶场；
-- 当前靶场为单页面、单拓扑，一个 Job 只对应一个 Session；
+- 当前靶场为单页面、单拓扑，一个 Job 可对应一个或多个 Session；
 - `range_id` 由基座提供，其值必须与工程中心保存的靶场模板 ID 对齐；
 - `model_id` 必须来自模型查询接口，且创建 Job 时仍处于可用状态；
 - ID 均为不透明字符串，调用方不得解析或自行拼接 ID；
-- Job 异步运行，`session_id`、得分和轨迹均可能暂未生成，调用方应按本文约定轮询。
+- Job 异步运行，`session_id` 列表、得分和轨迹均可能暂未生成，调用方应按本文约定轮询。
 
 ## 2. 调用流程
 
@@ -36,22 +36,22 @@
 sequenceDiagram
     participant Client as 调用方
     participant Base as 基座 API
-    participant Center as 工程中心
 
     Client->>Base: GET /v1/models
     Base-->>Client: 可用 model_id
-    Note over Client,Center: 调用方取得与工程中心靶场模板对齐的 range_id
+    Note over Client,Base: 调用方取得基座提供的 range_id
     Client->>Base: POST /v1/jobs (model_id + range_id)
-    Base->>Center: 按 range_id 解析靶场模板
     Base-->>Client: job_id
-    Client->>Base: GET /v1/jobs/{job_id}/session
-    Base-->>Client: 唯一 session_id（未就绪时为 null）
-    Client->>Base: GET /v1/sessions/{session_id}/result
-    Base-->>Client: 运行状态和得分
-    Client->>Base: GET /v1/sessions/{session_id}/steps
-    Base-->>Client: step_count 和 step_id 列表
-    Client->>Base: GET /v1/sessions/{session_id}/steps/{step_id}/trajectory
-    Base-->>Client: 指定 step 的具体轨迹
+    Client->>Base: GET /v1/jobs/{job_id}/sessions
+    Base-->>Client: session_ids（未就绪时为空列表）
+    loop 遍历 session_ids
+        Client->>Base: GET /v1/sessions/{session_id}/result
+        Base-->>Client: 运行状态和得分
+        Client->>Base: GET /v1/sessions/{session_id}/steps
+        Base-->>Client: step_count 和 step_id 列表
+        Client->>Base: GET /v1/sessions/{session_id}/steps/{step_id}/trajectory
+        Base-->>Client: 指定 step 的具体轨迹
+    end
 ```
 
 接口总览：
@@ -60,7 +60,7 @@ sequenceDiagram
 |---:|---|---|---|
 | 1 | GET | `/v1/models` | 查询基座支持的模型 |
 | 2 | POST | `/v1/jobs` | 选择模型和靶场并创建 Job |
-| 3 | GET | `/v1/jobs/{job_id}/session` | 使用 Job ID 查询唯一 Session ID |
+| 3 | GET | `/v1/jobs/{job_id}/sessions` | 使用 Job ID 查询 Session ID 列表 |
 | 4 | GET | `/v1/sessions/{session_id}/result` | 查询运行结果（得分） |
 | 5 | GET | `/v1/sessions/{session_id}/steps` | 查询轨迹 step 数和 Step ID |
 | 6 | GET | `/v1/sessions/{session_id}/steps/{step_id}/trajectory` | 查询某一步具体轨迹 |
@@ -180,7 +180,7 @@ HTTP/1.1 200 OK
 
 ```http
 HTTP/1.1 202 Accepted
-Location: /v1/jobs/job_01K2XYZ.../session
+Location: /v1/jobs/job_01K2XYZ.../sessions
 ```
 
 ```json
@@ -193,7 +193,7 @@ Location: /v1/jobs/job_01K2XYZ.../session
 }
 ```
 
-创建响应只保证 Job 已被接受，不保证 Session 已经创建。调用方应使用返回的 `job_id` 查询 `session_id`。
+创建响应只保证 Job 已被接受，不保证 Session 已经创建。调用方应使用返回的 `job_id` 查询 `session_id` 列表。
 
 ### 主要错误码
 
@@ -206,13 +206,13 @@ Location: /v1/jobs/job_01K2XYZ.../session
 | `MODEL_RANGE_NOT_SUPPORTED` | 422 | 所选模型不支持该靶场 |
 | `DEPENDENCY_UNAVAILABLE` | 503 | 工程中心或执行依赖暂不可用 |
 
-## 6. 使用 Job ID 查询 Session ID
+## 6. 使用 Job ID 查询 Session ID 列表
 
-### `GET /v1/jobs/{job_id}/session`
+### `GET /v1/jobs/{job_id}/sessions`
 
-查询当前 Job 唯一的 Session。由于 Job 异步启动，接口可能在 Session 创建前被调用。
+查询当前 Job 关联的 Session ID 列表。由于 Job 异步启动，接口可能在 Session 创建前被调用。
 
-### Response：Session 尚未就绪
+### Response：Session ID 列表为空
 
 ```http
 HTTP/1.1 200 OK
@@ -223,12 +223,11 @@ Retry-After: 2
 {
   "job_id": "job_01K2XYZ...",
   "job_status": "preparing",
-  "session_ready": false,
-  "session_id": null
+  "session_ids": []
 }
 ```
 
-### Response：Session 已就绪
+### Response：Session ID 列表非空
 
 ```http
 HTTP/1.1 200 OK
@@ -238,8 +237,10 @@ HTTP/1.1 200 OK
 {
   "job_id": "job_01K2XYZ...",
   "job_status": "running",
-  "session_ready": true,
-  "session_id": "session_01K3ABC..."
+  "session_ids": [
+    "session_01K3ABC...",
+    "session_01K3DEF..."
+  ]
 }
 ```
 
@@ -249,15 +250,14 @@ HTTP/1.1 200 OK
 |---|---|---:|---|
 | `job_id` | string | 是 | Job ID |
 | `job_status` | string | 是 | `queued`、`preparing`、`running`、`succeeded` 或 `failed` |
-| `session_ready` | boolean | 是 | Session 是否已经创建 |
-| `session_id` | string/null | 是 | 当前 Job 唯一的 Session ID；未就绪或创建失败时为 `null` |
+| `session_ids` | array | 是 | 当前 Job 关联的 Session ID 字符串列表；尚未创建或创建失败时为空列表 |
 | `error` | object | 否 | `job_status=failed` 时的失败原因 |
 
 约束：
 
-- `session_ready=false` 且 Job 未失败时，调用方可根据 `Retry-After` 继续轮询；
-- 同一个 `job_id` 一旦返回非空 `session_id`，后续不得变更；
-- 服务端不得为一个 Job 返回多个 Session ID；
+- `session_ids` 为空且 Job 未失败时，调用方可根据 `Retry-After` 继续轮询；
+- 同一个 `job_id` 可返回多个 Session ID，列表中不得包含重复项；
+- Job 进入终态前，`session_ids` 可追加新值，但已返回的 Session ID 不得变更或移除；Job 进入终态后，列表不得再变更；
 - Job 不存在时返回 `404 JOB_NOT_FOUND`。
 
 ## 7. 使用 Session ID 查询结果（得分）
@@ -434,8 +434,8 @@ HTTP/1.1 200 OK
 
 1. 从模型接口取得 `model_id`；
 2. 创建 Job 并取得 `job_id`；
-3. 轮询 Job 的 Session 接口，最终取得且只取得一个 `session_id`；
-4. 使用 `session_id` 查询运行结果并在完成后取得得分；
-5. 使用 `session_id` 查询 `step_count` 和全部可用 `step_id`；
+3. 轮询 Job 的 Session 列表接口，取得 `session_ids` 列表；
+4. 对列表中的每个 `session_id`，查询运行结果并在完成后取得得分；
+5. 对列表中的每个 `session_id`，查询 `step_count` 和全部可用 `step_id`；
 6. 对每个 `step_id`，使用 `session_id + step_id` 查询对应的具体轨迹；
-7. 当 `sealed=true` 时，已查询到的 step 数量必须等于 `step_count`，且每个 Step 均可获取唯一的轨迹详情。
+7. 对每个 Session，当 `sealed=true` 时，已查询到的 step 数量必须等于 `step_count`，且每个 Step 均可获取唯一的轨迹详情。
