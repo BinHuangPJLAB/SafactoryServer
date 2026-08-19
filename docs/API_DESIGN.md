@@ -4,7 +4,7 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v2.2 |
+| 文档版本 | v2.3 |
 | 更新日期 | 2026-08-19 |
 | Base Path | `/v1` |
 
@@ -15,9 +15,9 @@
 1. 查询基座支持的模型；
 2. 使用 `model_id` 和 `range_id` 创建 Job；
 3. 使用 `job_id` 查询 `session_id` 列表；
-4. 使用列表中的 `session_id` 查询运行结果（得分）；
-5. 使用列表中的 `session_id` 查询轨迹 step 数及 `step_id`；
-6. 使用 `session_id` 和 `step_id` 查询某一步的具体轨迹。
+4. 使用 `job_id` 和列表中的 `session_id` 查询运行结果（得分）；
+5. 使用 `job_id` 和列表中的 `session_id` 查询轨迹 step 数及 `step_id`；
+6. 使用 `job_id`、`session_id` 和 `step_id` 查询某一步的具体轨迹。
 
 不在本文中定义 Job 列表、Task、暂停、恢复、取消、删除、Artifact、日志、事件推送和靶场模板管理接口。
 
@@ -28,6 +28,7 @@
 - `range_id` 由基座提供，其值必须与工程中心保存的靶场模板 ID 对齐；
 - `model_id` 必须来自模型查询接口，且创建 Job 时仍处于可用状态；
 - ID 均为不透明字符串，调用方不得解析或自行拼接 ID；
+- 创建 Job 后的所有查询都必须携带 `job_id`，服务端必须校验 Session、Step 与 Job 的归属关系；
 - Job 异步运行，`session_id` 列表、得分和轨迹均可能暂未生成，调用方应按本文约定轮询。
 
 ## 2. 调用流程
@@ -45,11 +46,11 @@ sequenceDiagram
     Client->>Base: GET /v1/jobs/sessions?job_id=...
     Base-->>Client: session_ids（未就绪时为空列表）
     loop 遍历 session_ids
-        Client->>Base: GET /v1/sessions/result?session_id=...
+        Client->>Base: GET /v1/sessions/result?job_id=...&session_id=...
         Base-->>Client: 运行状态和得分
-        Client->>Base: GET /v1/sessions/steps?session_id=...
+        Client->>Base: GET /v1/sessions/steps?job_id=...&session_id=...
         Base-->>Client: step_count 和 step_id 列表
-        Client->>Base: GET /v1/sessions/steps/trajectory?session_id=...&step_id=...
+        Client->>Base: GET /v1/sessions/steps/trajectory?job_id=...&session_id=...&step_id=...
         Base-->>Client: 指定 step 的具体轨迹
     end
 ```
@@ -61,9 +62,9 @@ sequenceDiagram
 | 1 | GET | `/v1/models` | 查询基座支持的模型 |
 | 2 | POST | `/v1/jobs` | 选择模型和靶场并创建 Job |
 | 3 | GET | `/v1/jobs/sessions` | 使用 query 参数 `job_id` 查询 Session ID 列表 |
-| 4 | GET | `/v1/sessions/result` | 使用 query 参数 `session_id` 查询运行结果（得分） |
-| 5 | GET | `/v1/sessions/steps` | 使用 query 参数 `session_id` 查询轨迹 step 数和 Step ID |
-| 6 | GET | `/v1/sessions/steps/trajectory` | 使用 query 参数 `session_id`、`step_id` 查询某一步具体轨迹 |
+| 4 | GET | `/v1/sessions/result` | 使用 query 参数 `job_id`、`session_id` 查询运行结果（得分） |
+| 5 | GET | `/v1/sessions/steps` | 使用 query 参数 `job_id`、`session_id` 查询轨迹 step 数和 Step ID |
+| 6 | GET | `/v1/sessions/steps/trajectory` | 使用 query 参数 `job_id`、`session_id`、`step_id` 查询某一步具体轨迹 |
 
 ## 3. 通用约定
 
@@ -278,18 +279,19 @@ HTTP/1.1 200 OK
 
 ### `GET /v1/sessions/result`
 
-查询 Session 的运行状态和得分。该接口可以在运行中调用。
+查询指定 Job 下 Session 的运行状态和得分。该接口可以在运行中调用。
 
 ### Query parameters
 
 | 参数 | 类型 | 必需 | 说明 |
 |---|---|---:|---|
-| `session_id` | string | 是 | Session ID |
+| `job_id` | string | 是 | Job ID |
+| `session_id` | string | 是 | Session ID，且必须属于指定 Job |
 
 请求示例：
 
 ```http
-GET /v1/sessions/result?session_id=session_01K3ABC... HTTP/1.1
+GET /v1/sessions/result?job_id=job_01K2XYZ...&session_id=session_01K3ABC... HTTP/1.1
 ```
 
 ### Response：结果尚未就绪
@@ -333,24 +335,25 @@ HTTP/1.1 200 OK
 | `completed_at` | string/null | 是 | 结果完成时间 |
 | `error` | object | 否 | `result_status=failed` 时的失败原因 |
 
-Session 不存在时返回 `404 SESSION_NOT_FOUND`。结果尚未完成时返回 200 和空得分，调用方可根据 `Retry-After` 继续轮询。
+Job 不存在时返回 `404 JOB_NOT_FOUND`。Session 不存在或不属于指定 Job 时返回 `404 SESSION_NOT_FOUND`。结果尚未完成时返回 200 和空得分，调用方可根据 `Retry-After` 继续轮询。
 
 ## 8. 使用 Session ID 查询轨迹 step
 
 ### `GET /v1/sessions/steps`
 
-在查询具体轨迹前，先调用此接口取得当前 step 数和可用的 `step_id`。
+在查询具体轨迹前，先调用此接口取得指定 Job 下 Session 的当前 step 数和可用的 `step_id`。
 
 ### Query parameters
 
 | 参数 | 类型 | 必需 | 说明 |
 |---|---|---:|---|
-| `session_id` | string | 是 | Session ID |
+| `job_id` | string | 是 | Job ID |
+| `session_id` | string | 是 | Session ID，且必须属于指定 Job |
 
 请求示例：
 
 ```http
-GET /v1/sessions/steps?session_id=session_01K3ABC... HTTP/1.1
+GET /v1/sessions/steps?job_id=job_01K2XYZ...&session_id=session_01K3ABC... HTTP/1.1
 ```
 
 ### Response
@@ -398,25 +401,26 @@ HTTP/1.1 200 OK
 - `sealed=false` 表示后续查询可能得到更多 step；
 - `sealed=true` 表示轨迹已经完整；
 - 已返回的 `step_id` 及其 `sequence_no` 不得变化或被复用；
-- Session 不存在时返回 `404 SESSION_NOT_FOUND`。
+- Job 不存在时返回 `404 JOB_NOT_FOUND`；Session 不存在或不属于指定 Job 时返回 `404 SESSION_NOT_FOUND`。
 
 ## 9. 使用 Session ID 和 Step ID 查询具体轨迹
 
 ### `GET /v1/sessions/steps/trajectory`
 
-返回指定 Session 中某一步的具体轨迹。`session_id` 和 `step_id` 必须同时参与查询和归属校验。
+返回指定 Job 下 Session 中某一步的具体轨迹。`job_id`、`session_id` 和 `step_id` 必须同时参与查询和归属校验。
 
 ### Query parameters
 
 | 参数 | 类型 | 必需 | 说明 |
 |---|---|---:|---|
-| `session_id` | string | 是 | Session ID |
+| `job_id` | string | 是 | Job ID |
+| `session_id` | string | 是 | Session ID，且必须属于指定 Job |
 | `step_id` | string | 是 | Step ID，且必须属于指定 Session |
 
 请求示例：
 
 ```http
-GET /v1/sessions/steps/trajectory?session_id=session_01K3ABC...&step_id=step_002 HTTP/1.1
+GET /v1/sessions/steps/trajectory?job_id=job_01K2XYZ...&session_id=session_01K3ABC...&step_id=step_002 HTTP/1.1
 ```
 
 ### Response
@@ -461,7 +465,7 @@ HTTP/1.1 200 OK
 | `trajectory.action` | object/null | 否 | 本步执行的动作或工具调用 |
 | `trajectory.observation` | object/null | 否 | 动作执行后的环境反馈 |
 
-服务端必须过滤密钥、鉴权信息、宿主机路径等敏感数据。不存在的 `session_id` 返回 `404 SESSION_NOT_FOUND`；`step_id` 不存在或不属于该 Session 时统一返回 `404 STEP_NOT_FOUND`，不得返回其他 Session 的轨迹。
+服务端必须过滤密钥、鉴权信息、宿主机路径等敏感数据。不存在的 `job_id` 返回 `404 JOB_NOT_FOUND`；`session_id` 不存在或不属于指定 Job 时返回 `404 SESSION_NOT_FOUND`；`step_id` 不存在或不属于该 Session 时统一返回 `404 STEP_NOT_FOUND`，不得返回其他 Job 或 Session 的轨迹。
 
 ## 10. 稳定错误码
 
@@ -474,7 +478,7 @@ HTTP/1.1 200 OK
 | `RANGE_NOT_AVAILABLE` | 422 | 视情况 | 靶场模板当前不可用 |
 | `MODEL_RANGE_NOT_SUPPORTED` | 422 | 否 | 模型与靶场组合不受支持 |
 | `JOB_NOT_FOUND` | 404 | 否 | Job 不存在 |
-| `SESSION_NOT_FOUND` | 404 | 否 | Session 不存在 |
+| `SESSION_NOT_FOUND` | 404 | 否 | Session 不存在或不属于指定 Job |
 | `STEP_NOT_FOUND` | 404 | 否 | Step 不存在或不属于指定 Session |
 | `DEPENDENCY_UNAVAILABLE` | 503 | 是 | 工程中心、执行引擎或存储暂不可用 |
 | `INTERNAL_ERROR` | 500 | 是 | 未分类的服务端错误 |
@@ -486,7 +490,7 @@ HTTP/1.1 200 OK
 1. 从模型接口取得 `model_id`；
 2. 创建 Job 并取得 `job_id`；
 3. 轮询 Job 的 Session 列表接口，取得 `session_ids` 列表；
-4. 对列表中的每个 `session_id`，查询运行结果并在完成后取得得分；
-5. 对列表中的每个 `session_id`，查询 `step_count` 和全部可用 `step_id`；
-6. 对每个 `step_id`，使用 `session_id + step_id` 查询对应的具体轨迹；
+4. 对列表中的每个 `session_id`，使用 `job_id + session_id` 查询运行结果并在完成后取得得分；
+5. 对列表中的每个 `session_id`，使用 `job_id + session_id` 查询 `step_count` 和全部可用 `step_id`；
+6. 对每个 `step_id`，使用 `job_id + session_id + step_id` 查询对应的具体轨迹；
 7. 对每个 Session，当 `sealed=true` 时，已查询到的 step 数量必须等于 `step_count`，且每个 Step 均可获取唯一的轨迹详情。
