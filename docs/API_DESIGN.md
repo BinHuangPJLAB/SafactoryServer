@@ -4,8 +4,8 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v2.1 |
-| 更新日期 | 2026-08-17 |
+| 文档版本 | v2.2 |
+| 更新日期 | 2026-08-19 |
 | Base Path | `/v1` |
 
 ## 1. 设计范围
@@ -42,14 +42,14 @@ sequenceDiagram
     Note over Client,Base: 调用方取得基座提供的 range_id
     Client->>Base: POST /v1/jobs (model_id + range_id)
     Base-->>Client: job_id
-    Client->>Base: GET /v1/jobs/{job_id}/sessions
+    Client->>Base: GET /v1/jobs/sessions?job_id=...
     Base-->>Client: session_ids（未就绪时为空列表）
     loop 遍历 session_ids
-        Client->>Base: GET /v1/sessions/{session_id}/result
+        Client->>Base: GET /v1/sessions/result?session_id=...
         Base-->>Client: 运行状态和得分
-        Client->>Base: GET /v1/sessions/{session_id}/steps
+        Client->>Base: GET /v1/sessions/steps?session_id=...
         Base-->>Client: step_count 和 step_id 列表
-        Client->>Base: GET /v1/sessions/{session_id}/steps/{step_id}/trajectory
+        Client->>Base: GET /v1/sessions/steps/trajectory?session_id=...&step_id=...
         Base-->>Client: 指定 step 的具体轨迹
     end
 ```
@@ -60,10 +60,10 @@ sequenceDiagram
 |---:|---|---|---|
 | 1 | GET | `/v1/models` | 查询基座支持的模型 |
 | 2 | POST | `/v1/jobs` | 选择模型和靶场并创建 Job |
-| 3 | GET | `/v1/jobs/{job_id}/sessions` | 使用 Job ID 查询 Session ID 列表 |
-| 4 | GET | `/v1/sessions/{session_id}/result` | 查询运行结果（得分） |
-| 5 | GET | `/v1/sessions/{session_id}/steps` | 查询轨迹 step 数和 Step ID |
-| 6 | GET | `/v1/sessions/{session_id}/steps/{step_id}/trajectory` | 查询某一步具体轨迹 |
+| 3 | GET | `/v1/jobs/sessions` | 使用 query 参数 `job_id` 查询 Session ID 列表 |
+| 4 | GET | `/v1/sessions/result` | 使用 query 参数 `session_id` 查询运行结果（得分） |
+| 5 | GET | `/v1/sessions/steps` | 使用 query 参数 `session_id` 查询轨迹 step 数和 Step ID |
+| 6 | GET | `/v1/sessions/steps/trajectory` | 使用 query 参数 `session_id`、`step_id` 查询某一步具体轨迹 |
 
 ## 3. 通用约定
 
@@ -73,7 +73,9 @@ sequenceDiagram
 - 请求和响应使用 `application/json; charset=utf-8`；
 - 字段名使用 `snake_case`；
 - 时间使用 UTC RFC 3339，例如 `2026-08-17T08:30:00Z`；
-- 路径中的 `job_id`、`session_id`、`step_id` 必须进行 URL 编码。
+- API 路径使用固定资源路径，不得将 `job_id`、`session_id`、`step_id` 等可变参数编码为路径片段；
+- `job_id`、`session_id`、`step_id` 统一通过 query 参数传递，其值必须进行 URL 编码；
+- 必需的 query 参数缺失或为空时，返回 `400 INVALID_REQUEST`。
 
 ### 3.2 错误响应
 
@@ -180,7 +182,7 @@ HTTP/1.1 200 OK
 
 ```http
 HTTP/1.1 202 Accepted
-Location: /v1/jobs/job_01K2XYZ.../sessions
+Location: /v1/jobs/sessions?job_id=job_01K2XYZ...
 ```
 
 ```json
@@ -208,9 +210,21 @@ Location: /v1/jobs/job_01K2XYZ.../sessions
 
 ## 6. 使用 Job ID 查询 Session ID 列表
 
-### `GET /v1/jobs/{job_id}/sessions`
+### `GET /v1/jobs/sessions`
 
 查询当前 Job 关联的 Session ID 列表。由于 Job 异步启动，接口可能在 Session 创建前被调用。
+
+### Query parameters
+
+| 参数 | 类型 | 必需 | 说明 |
+|---|---|---:|---|
+| `job_id` | string | 是 | Job ID |
+
+请求示例：
+
+```http
+GET /v1/jobs/sessions?job_id=job_01K2XYZ... HTTP/1.1
+```
 
 ### Response：Session ID 列表为空
 
@@ -262,9 +276,21 @@ HTTP/1.1 200 OK
 
 ## 7. 使用 Session ID 查询结果（得分）
 
-### `GET /v1/sessions/{session_id}/result`
+### `GET /v1/sessions/result`
 
 查询 Session 的运行状态和得分。该接口可以在运行中调用。
+
+### Query parameters
+
+| 参数 | 类型 | 必需 | 说明 |
+|---|---|---:|---|
+| `session_id` | string | 是 | Session ID |
+
+请求示例：
+
+```http
+GET /v1/sessions/result?session_id=session_01K3ABC... HTTP/1.1
+```
 
 ### Response：结果尚未就绪
 
@@ -311,9 +337,21 @@ Session 不存在时返回 `404 SESSION_NOT_FOUND`。结果尚未完成时返回
 
 ## 8. 使用 Session ID 查询轨迹 step
 
-### `GET /v1/sessions/{session_id}/steps`
+### `GET /v1/sessions/steps`
 
 在查询具体轨迹前，先调用此接口取得当前 step 数和可用的 `step_id`。
+
+### Query parameters
+
+| 参数 | 类型 | 必需 | 说明 |
+|---|---|---:|---|
+| `session_id` | string | 是 | Session ID |
+
+请求示例：
+
+```http
+GET /v1/sessions/steps?session_id=session_01K3ABC... HTTP/1.1
+```
 
 ### Response
 
@@ -364,9 +402,22 @@ HTTP/1.1 200 OK
 
 ## 9. 使用 Session ID 和 Step ID 查询具体轨迹
 
-### `GET /v1/sessions/{session_id}/steps/{step_id}/trajectory`
+### `GET /v1/sessions/steps/trajectory`
 
 返回指定 Session 中某一步的具体轨迹。`session_id` 和 `step_id` 必须同时参与查询和归属校验。
+
+### Query parameters
+
+| 参数 | 类型 | 必需 | 说明 |
+|---|---|---:|---|
+| `session_id` | string | 是 | Session ID |
+| `step_id` | string | 是 | Step ID，且必须属于指定 Session |
+
+请求示例：
+
+```http
+GET /v1/sessions/steps/trajectory?session_id=session_01K3ABC...&step_id=step_002 HTTP/1.1
+```
 
 ### Response
 
