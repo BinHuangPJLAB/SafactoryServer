@@ -3,61 +3,63 @@
 | 属性 | 内容 |
 |---|---|
 | 产品名称 | Safactory Job Server |
-| 文档版本 | v1.1 |
+| 文档版本 | v2.0 |
 | 文档状态 | Draft for Review |
-| 更新日期 | 2026-08-19 |
+| 更新日期 | 2026-08-20 |
 | 目标版本 | MVP / v1 |
 
 ## 1. 文档目的
 
-本文定义 Safactory Job Server 的产品目标、执行架构、任务调度、任务停止、S3 数据读写约束、状态模型和验收标准。对外接口字段、路径和错误响应以 [API_DESIGN.md](./API_DESIGN.md) 为准，本文不重复定义接口契约。
+本文定义 Safactory Job Server 的产品边界、RJob 调度方式、Gateway 与 Safactory 工作负载的启动顺序、YAML/`dataset.jsonl` 文件管理、运行状态和查询数据链路。
+
+对外接口字段、路径、状态和错误响应以 [API_DESIGN.md](./API_DESIGN.md) 为准。本文只描述这些接口背后的服务与执行架构，不另行扩展公开接口。
 
 本版本采用以下核心方案：
 
-> 一个 Job 对应一次独立的 Safactory 靶场任务。每个 Job 独占一套 Gateway 执行单元（Gateway 实例及其 gateway worker）和一个 Safactory worker；任务输入、Session、轨迹、得分和结果统一写入并从 S3 获取，控制面数据库只保存调度状态、资源归属和 S3 对象索引。
+> 系统提供一个统一的 Job Server，对外实现 API 文档中的全部接口。创建 Job 后，Server 通过 RJob 平台依次从 Gateway base image 和 Safactory base image 创建两个独立工作负载：必须先启动 Gateway 并取得可被 Safactory 访问的网络地址，再启动 Safactory。Safactory 启动所需 YAML 配置和 `dataset.jsonl` 由统一文件管理系统按 `job_id` 解析并以只读 mount 方式注入。运行数据查询统一通过 `wt-data-platform-sdk` 完成。
 
-除特别说明外，本文中的“任务”指 API 中的 Job，而不是 Job 内部产生的 Session 或 trajectory step。
+除特别说明外，本文中的 Job 指 `POST /v1/jobs` 创建的一次靶场任务；“Gateway worker”和“Safactory worker”分别指该 Job 对应的两个 RJob 工作负载。
 
 ## 2. 背景与问题
 
-Safactory 已具备靶场执行、模型调用、Session 管理、trajectory 记录和结果评测能力，但要以服务方式提供给外部调用方，还需要补齐以下产品能力：
+Safactory 已具备基于 YAML 配置和 dataset 文件执行任务、经 Gateway 发起模型请求、生成 Session/trajectory 并把数据写入数据平台的能力。为了向外部调用方提供稳定服务，需要补齐以下能力：
 
-- 创建请求与长时间运行的任务解耦；
-- 对 Job 排队、领取、启动、运行和停止进行持久化调度；
-- 为不同 Job 隔离模型路由、Gateway 状态和 Safactory 执行上下文；
-- 避免多个任务共享 Gateway 或 worker 时发生配置串扰、轨迹串写和故障扩散；
-- 统一运行数据来源，避免 API 分别读取进程内存、本地文件和不同数据库而出现结果不一致；
-- 在服务或 worker 异常后识别失联任务并回收孤儿进程；
-- 让现有 API 可以稳定查询 Session、得分、step 索引和具体轨迹。
+- 用一个长期运行的 Server 承载 API 文档中的六个接口；
+- 将 HTTP 请求与异步 RJob 执行解耦；
+- 为每个 Job 创建独立的 Gateway worker 和 Safactory worker；
+- 保证 Gateway 先就绪，并将其集群内可访问地址传给 Safactory；
+- 统一管理 Safactory 所需 YAML 和 `dataset.jsonl`，建立稳定的 `job_id` 文件映射；
+- 在 Server 重启后根据持久化的 RJob ID 恢复任务状态；
+- 通过 `wt-data-platform-sdk` 查询 Session、得分和轨迹，不从 worker 内存或本地文件读取结果。
 
 ## 3. 产品目标与非目标
 
 ### 3.1 MVP 目标
 
-1. 按现有 API 使用 `model_id` 和 `range_id` 创建异步 Job。
-2. 通过持久化队列调度 Job，同一 Job 同一时刻只能由一个有效调度实例执行。
-3. 每个 Job 启动专属 Gateway 实例和专属 gateway worker，不与其他 Job 共用运行进程或可变配置。
-4. 每个 Job 启动专属 Safactory worker，且该 worker 同一时刻只运行该 Job。
-5. Safactory worker 通过专属 Gateway 执行模型调用，并可为一个 Job 产生一个或多个 Session。
-6. 任务运行所需输入以及产生的 Session、trajectory、结果和得分全部持久化到 S3。
-7. 所有运行数据查询以 S3 为唯一业务数据源，不依赖原 worker 或 Gateway 仍然在线。
-8. 支持对排队中或运行中的 Job 发出幂等停止命令，并完成进程终止、部分数据封存和资源回收。
-9. 通过 lease、heartbeat 和 fencing token 识别 worker 失联并避免重复执行或旧 worker 回写。
-10. 提供足够的日志、指标和审计信息定位调度、Gateway、Safactory worker 与 S3 故障。
+1. 部署一个 Safactory Job Server，实现 [API_DESIGN.md](./API_DESIGN.md) 定义的所有接口。
+2. 使用 `model_id + range_id` 创建异步 Job，并立即返回 `202 Accepted` 和 `job_id`。
+3. Job 调度统一通过 RJob 平台完成，Server 不在本机直接启动 Gateway 或 Safactory 进程。
+4. 提供可被 RJob 拉取的 Gateway base image 和 Safactory base image，并记录实际使用的不可变版本或 digest。
+5. 每个 Job 先创建一个 Gateway RJob；仅当 Gateway 地址已取得且健康检查通过后，才创建 Safactory RJob。
+6. 创建 Safactory RJob 时，把 `job_id`、模型信息、Gateway URL、YAML 和 `dataset.jsonl` mount 信息传入工作负载。
+7. 统一文件管理系统维护 `range_id → 文件模板` 和 `job_id → 已解析文件版本` 的映射。
+8. Safactory worker 通过只读 mount 读取 YAML 和 `dataset.jsonl`，按现有启动约定运行。
+9. Server 持久化 Job 状态、两个 RJob ID、Gateway 地址和文件绑定，重启后可继续轮询和清理。
+10. Session、结果和轨迹查询全部通过 `wt-data-platform-sdk` 访问共享数据表，并始终包含 `job_id` 过滤条件。
 
 ### 3.2 非目标
 
 以下内容不属于 MVP：
 
-- 一个 Safactory worker 并行运行多个 Job；
-- 多个 Job 共享 Gateway、gateway worker 或 warm worker pool；
-- 将正在运行的 Job 迁移到另一 Safactory worker 后无损续跑；
-- 暂停后保留内存上下文并恢复；
-- Session 级或 step 级手动停止、重试和抢占；
-- 从 worker 本地磁盘、Gateway 内存或控制面数据库直接返回 trajectory、得分等运行数据；
-- 将任意调用方输入直接转换为 shell command、宿主机路径或容器挂载；
-- Job 列表、Artifact、日志、事件推送和靶场模板管理等未在当前 API 文档中定义的公开接口；
-- 完整的多租户计费和跨集群调度。
+- 在 Server 所在机器通过 Docker 或子进程直接运行 Gateway/Safactory；
+- 为 Gateway 调度和 Safactory 调度分别部署两个 Scheduler 服务；
+- 为每个 Job 构建新 image；Job 直接引用预构建的 base image；
+- 在 Gateway 尚未取得可路由地址前并行启动 Safactory；
+- 允许调用方上传或直接指定任意 YAML、JSONL、mount 源路径、image、命令或凭据；
+- 从 worker 本地文件、RJob 日志或进程内存返回 Session、得分和 trajectory；
+- 为每个 Job 创建独立 S3 前缀、独立数据表或临时 S3 凭据；
+- Job 列表、取消、删除、Artifact、日志、事件推送和文件管理公开接口；
+- 暂停后保留内存上下文并恢复，以及 Session/step 级重试或停止。
 
 ## 4. 用户角色与核心场景
 
@@ -65,626 +67,579 @@ Safactory 已具备靶场执行、模型调用、Session 管理、trajectory 记
 
 | 角色 | 主要诉求 |
 |---|---|
-| 基座调用方 | 创建靶场 Job，轮询 Session，查询得分与轨迹。 |
-| 调度服务 | 可靠领取任务，为每个 Job 启动并管理独立执行单元。 |
-| 运维人员 | 停止异常任务，查看失败阶段，确认进程和临时凭据已回收。 |
-| 管理员 | 管理模型、靶场、并发配额、S3 桶策略和保留周期。 |
+| API 调用方 | 查询模型、创建 Job、轮询 Session、查询得分与轨迹。 |
+| Job Server | 校验请求、持久化 Job、编排两个 RJob、提供查询接口。 |
+| 文件管理员 | 维护 `range_id` 对应的 YAML 和 `dataset.jsonl` 模板及版本。 |
+| 运维人员 | 查看 RJob 状态、定位启动失败并清理异常工作负载。 |
+| 数据平台 | 持久化并提供 Session、step、trajectory 和 reward 查询。 |
 
 ### 4.2 正常执行流程
 
-1. 调用方通过模型接口取得可用 `model_id`，并持有基座提供的 `range_id`。
-2. 调用方创建 Job，Server 持久化 Job 并返回 `202 Accepted` 和 `job_id`。
-3. Scheduler 领取 Job，解析 `range_id` 对应的靶场元数据和 S3 输入位置。
-4. Scheduler 为该 Job 创建短期 S3 凭据和独立运行命名空间。
-5. Scheduler 启动该 Job 专属 Gateway 及 gateway worker，并等待健康检查通过。
-6. Scheduler 启动该 Job 专属 Safactory worker，并将专属 Gateway 地址、模型配置、S3 输入输出位置传给 worker。
-7. Safactory worker 从 S3 读取任务输入，运行任务并将 Session、step、trajectory 和结果持续写入 S3。
-8. API 根据控制面中的归属与 S3 key，从 S3 返回当前已可见的数据；运行中允许返回空列表或未完成状态。
-9. Job 完成后，Safactory worker 封存数据；Scheduler 按顺序停止 Safactory worker、gateway worker 和 Gateway，并写入终态。
+1. 调用方通过 `GET /v1/models` 取得可用 `model_id`，并持有基座提供的 `range_id`。
+2. 调用方通过 `POST /v1/jobs` 提交 `model_id + range_id`。
+3. Server 校验模型、靶场和文件模板，生成唯一 `job_id`，持久化 `queued` Job 并返回 `202 Accepted`。
+4. 后台编排器领取 Job，根据 `range_id` 解析 YAML 和 `dataset.jsonl` 模板，为该 `job_id` 发布不可变文件绑定。
+5. Server 使用 Gateway base image 创建 Gateway RJob，并写入 `job_id`、模型路由和运行参数。
+6. Server 轮询 Gateway RJob，等待其进入可运行状态，从 RJob 平台取得集群内 IP/DNS 和端口，再执行 Gateway 健康检查。
+7. Gateway 就绪后，Server 组合出 Safactory 可访问的 Gateway URL。
+8. Server 使用 Safactory base image 创建 Safactory RJob，传入 `job_id`、`model_id`、Gateway URL、YAML/JSONL mount 和 Safactory 启动参数。
+9. Safactory worker 从 mount 读取配置与数据集，运行任务；模型请求发往该 Job 的 Gateway。
+10. Safactory/Gateway 按现有链路把 Session、step、trajectory 和结果写入 `wt-data-platform-sdk` 管理的共享数据表，记录中包含 `job_id`。
+11. Server 持续轮询两个 RJob 的状态；Safactory 成功退出后，Job 进入 `succeeded`，随后按保留策略清理两个 RJob。
+12. 调用方通过 API 轮询 Session、得分和轨迹；Server 使用 SDK 按 `job_id` 及相关 Session/step 条件查询并归一化返回。
 
-### 4.3 停止流程
+### 4.3 失败与清理流程
 
-1. 内部控制面、超时策略或运维操作发出 Job 停止命令。
-2. 系统持久化 `stop_requested_at` 和停止原因；重复命令不得产生第二次停止流程。
-3. 排队中的 Job 直接停止，不再启动任何执行进程。
-4. 运行中的 Job 先停止创建新 Session，再通知 Safactory worker 协作式退出。
-5. Safactory worker 在宽限期内结束当前可安全结束的写入，并为已有数据写入部分完成或停止标记。
-6. 宽限期结束后仍未退出时，Scheduler 依次执行 `SIGTERM` 和强制终止。
-7. Safactory worker 退出后再停止 gateway worker 和 Gateway，避免先断开 Gateway 导致轨迹收尾丢失。
-8. 系统检查并封存 S3 索引、回收临时凭据和孤儿进程，最终进入 `stopped`。
+- 文件绑定创建失败时，不创建任何 RJob，Job 直接进入 `failed`。
+- Gateway RJob 创建或启动失败时，不得创建 Safactory RJob；Job 进入 `failed` 并清理 Gateway RJob。
+- Gateway 已启动但无法取得可路由地址或健康检查失败时，不得创建 Safactory RJob。
+- Safactory RJob 创建失败时，Job 进入 `failed`，并清理已创建的 Gateway RJob。
+- Safactory 运行期间 Gateway 异常退出时，Server 停止 Safactory RJob，再清理 Gateway RJob，Job 进入 `failed`。
+- Safactory 异常退出时，Server 保留已成功写入数据平台的数据，记录错误摘要，并清理 Gateway RJob。
+- 清理顺序始终为先 Safactory、后 Gateway，避免 Gateway 先退出导致仍在运行的 Safactory 请求失败或轨迹收尾丢失。
+- RJob 删除失败时进入后台清理队列，不得阻塞 API 查询已持久化的数据。
 
-当前 [API_DESIGN.md](./API_DESIGN.md) 明确不包含公开停止接口。因此 MVP 必须先具备内部停止能力；若调用方需要通过 HTTP 主动停止 Job，必须在 API 文档中另行补充接口、鉴权、状态和错误码后才能对外开放。
+当前 API 文档没有公开停止接口。MVP 只需支持超时、失败和运维触发的内部停止；若后续公开取消能力，必须先更新 API 契约。
 
 ## 5. 核心领域模型
 
 ### 5.1 Job
 
-Job 是外部创建、调度、停止、隔离和资源核算的最小单元：
+Job 是外部创建和查询的最小任务单元：
 
 - 由不透明的 `job_id` 唯一标识；
 - 绑定一个 `model_id` 和一个 `range_id`；
-- 对应一次 Safactory 运行；
-- 独占一个 Gateway 执行单元和一个 Safactory worker；
-- 拥有独立 S3 前缀、临时凭据和日志关联信息；
+- 绑定一个不可变的 YAML/`dataset.jsonl` 文件版本；
+- 最多拥有一个有效 Gateway RJob 和一个有效 Safactory RJob；
 - 可以产生一个或多个 Session；
-- 终态后不再增加 Session，已封存 Session 不再增加 step。
+- `job_id` 同时写入 RJob label/env、日志和数据平台记录，用于跨组件关联；
+- `job_id` 不是独立 S3 路径、独立表或底层权限边界。
 
-### 5.2 Gateway 执行单元
+### 5.2 Gateway worker
 
-每个 Job 必须创建独立 Gateway 执行单元，至少包含：
+Gateway worker 是从 Gateway base image 创建的一个 RJob：
 
-- 一个只服务于该 Job 的 Gateway 实例；
-- 一个使用该 Job 模型路由配置的 gateway worker；
-- 独立监听地址或服务发现标识；
-- 独立配置快照和进程标识；
-- 只允许该 Job 的 Safactory worker 访问的鉴权信息；
-- 健康检查、heartbeat 和退出状态。
-
-Gateway 执行单元不得复用其他 Job 的进程内可变配置。实现可以使用本地子进程、容器或编排平台 Pod，但必须满足同等隔离和生命周期语义。
+- 必须先于 Safactory worker 创建；
+- 接收 `job_id` 和由 `model_id` 解析出的可信模型路由配置；
+- 对 Safactory 暴露集群内可访问的 IP/DNS 和端口；
+- 必须提供可配置的 readiness/health 检查；
+- 一个 Gateway worker 只服务一个 Job；
+- 实际 RJob ID、image 版本、地址、端口和状态必须持久化；
+- Safactory 退出后才能停止或删除 Gateway worker。
 
 ### 5.3 Safactory worker
 
-每个 Job 必须创建一个独立 Safactory worker：
+Safactory worker 是从 Safactory base image 创建的一个 RJob：
 
-- worker 启动参数由 Scheduler 生成，不接受调用方提供的任意命令；
-- worker 只处理传入的 `job_id`；
-- worker 只连接该 Job 专属 Gateway；
-- worker 只读取授权的 S3 输入前缀，并只写入该 Job 的 S3 输出前缀；
-- worker 负责启动 Safactory `SimulationFlow`、生成 Session、运行评测并持久化数据；
-- worker 必须周期性 heartbeat，并响应协作式停止信号；
-- worker 退出码和退出原因必须转换为稳定的内部错误分类。
+- 只能在对应 Gateway worker ready 后创建；
+- 启动参数由 Server 生成，不接受调用方提供的任意命令；
+- 接收 `job_id`、`model_id`、Gateway URL 和 cloud storage/SDK 运行配置；
+- 以只读方式 mount 当前 Job 的 YAML 与 `dataset.jsonl`；
+- YAML 中的数据集路径必须指向容器内实际 mount 的 `dataset.jsonl`；
+- 按现有 Safactory CLI/entrypoint 约定启动任务；
+- 只连接该 Job 的 Gateway URL；
+- 退出码和 RJob 终态转换为稳定的内部 Job 状态和错误分类。
 
-### 5.4 Session
+### 5.4 Job 文件集
 
-Session 是 Job 中一次实际运行会话：
+每个 Job 文件集至少包含：
 
-- 使用不透明的 `session_id`；
-- 必须唯一归属于一个 `job_id`；
-- 包含零个或多个按顺序增长的 step；
-- 拥有独立结果、得分、轨迹索引和封存状态；
-- Session 失败不应删除已成功持久化的 step。
+- 一份 Safactory YAML 配置；
+- 一份 `dataset.jsonl`；
+- 文件版本、checksum、创建时间和来源 `range_id`；
+- 容器内 mount 目录与最终文件路径；
+- 可选的模板渲染参数，但不得包含明文密钥。
 
-### 5.5 Step
+文件集发布后对该 Job 不可变。需要修改配置时必须创建新 Job 或新的文件版本，不得在运行中原地覆盖。
 
-Step 是 Session 中可查询的最小轨迹单元：
+### 5.5 Session 与 Step
 
-- 使用不透明且在 Session 内唯一的 `step_id`；
-- 具有从 1 开始、只增不改的 `sequence_no`；
-- 轨迹内容包括归一化后的模型输入、模型输出、action 和 observation；
-- 一旦出现在已发布的 step 索引中，其 ID、顺序和对象内容不得被覆盖为另一条轨迹。
-
-### 5.6 控制数据与运行数据
-
-| 数据类别 | 示例 | 真相源 |
-|---|---|---|
-| 控制数据 | Job 状态、phase、lease、fencing token、进程 ID、停止标志、S3 key | Control-plane DB |
-| 运行输入 | 靶场数据、任务输入、执行所需数据快照 | S3 |
-| 运行输出 | Session 索引、step 索引、trajectory、得分、结果、完成清单 | S3 |
-| 诊断数据 | 结构化日志、指标、进程退出原因 | 日志/监控系统，关键摘要回写 Control-plane DB |
-
-控制面数据库不得保存一份可被 API 当作最终结果返回的 trajectory 或 score 副本，以免形成双重真相源。
+- Session 使用 `session_id`，并通过数据平台记录中的 `job_id` 归属于一个 Job；
+- Step 在 Session 内有稳定的 `step_id` 和顺序；
+- Session、Step、得分和轨迹不是 Server 控制数据库中的业务副本；
+- Server 通过 SDK 查询共享表后，按 API 文档归一化返回。
 
 ## 6. 总体架构
 
 ```mermaid
 flowchart LR
-    Client["API 调用方"] --> API["Job API"]
-    API --> CDB["Control-plane DB"]
-    Scheduler["Scheduler"] --> CDB
-    Scheduler --> SW
-    Scheduler --> GW
+    Client["API 调用方"] --> Server["Safactory Job Server<br/>API + RJob Orchestrator"]
+    Server --> CDB["Control DB"]
+    Server --> FM["YAML / JSONL 文件管理系统"]
+    Server --> RJob["RJob 平台"]
 
-    subgraph JobUnit["每个 Job 独占的执行单元"]
-        SW["Safactory worker"] --> GW["Gateway"]
-        GW --> GWW["gateway worker"]
-    end
+    RJob --> GW["Gateway worker<br/>Gateway base image"]
+    RJob --> SW["Safactory worker<br/>Safactory base image"]
+    FM -->|"只读 mount"| SW
+    SW -->|"Gateway URL"| GW
 
-    SW --> S3["S3"]
-    GWW --> S3
-    API --> S3
-    Range["工程中心 / 靶场元数据"] --> Scheduler
+    GW --> DP["wt-data-platform-sdk<br/>共享数据表"]
+    SW --> DP
+    Server -->|"查询"| DP
 ```
 
 架构约束：
 
-- API 请求线程不得直接运行 Safactory 或启动长时间任务；
-- Scheduler 只负责控制面决策和执行单元生命周期，不代理 trajectory 或结果数据；
-- 一个 Job 对应一个执行单元；执行单元中的 Gateway、gateway worker 和 Safactory worker 不与其他 Job 共享；
-- 调度 Job 前必须同时预留 Gateway 单元与 Safactory worker 所需资源，避免只启动一半后长期占用；
-- Safactory worker 与 gateway worker 的全部业务输出必须进入同一 Job 的 S3 命名空间；
-- API 查询先校验 `job_id`、`session_id`、`step_id` 的归属，再读取对应 S3 对象；
-- Control-plane DB 是调度状态真相源，S3 是任务输入和运行数据真相源，两者通过 `job_id` 关联。
+- 对外只有一个 Job Server；RJob 编排是 Server 的内部模块，不需要单独部署两个 Scheduler。
+- Server 只提交、轮询和清理 RJob，不承载 Safactory 或 Gateway 的业务进程。
+- 一个 Job 固定创建两个工作负载：一个 Gateway RJob、一个 Safactory RJob。
+- 两个 RJob 引用预构建 base image，不在 Job 创建路径上构建 image。
+- Gateway ready 和地址发现是创建 Safactory RJob 的硬前置条件。
+- YAML/JSONL 必须来自受控文件管理系统，并通过 RJob 可访问的共享存储 mount。
+- Server 查询运行数据时只调用 `wt-data-platform-sdk`，不直接访问底层 S3 对象。
 
-## 7. S3 数据规范
+## 7. Base image 与 RJob 规范
 
-### 7.1 数据源唯一性
+### 7.1 Base image 管理
 
-运行期和查询期必须遵守以下规则：
+系统配置中至少维护：
 
-- 靶场实际运行数据统一从 S3 获取；工程中心可以提供 `range_id` 对应的元数据和 S3 定位信息，但不得向 worker 直接返回另一份运行数据；
-- Safactory worker 不得把本地临时文件作为完成依据，写入 S3 并成功发布索引后才视为数据可查询；
-- Gateway 或 gateway worker 如产生轨迹中间数据，也必须写入该 Job 的 S3 前缀；
-- API 不得通过 RPC 向仍在运行的 worker 临时拉取结果；
-- 本地磁盘只允许保存可删除的临时文件，Job 完成或停止后必须清理；
-- S3 不可用时不得静默切换为本地结果，任务应重试或以存储错误结束。
+| 配置项 | 说明 |
+|---|---|
+| `gateway_base_image` | Gateway worker 使用的 registry image，生产环境应固定 digest |
+| `safactory_base_image` | Safactory worker 使用的 registry image，生产环境应固定 digest |
+| `image_pull_policy` | RJob 拉取策略 |
+| `gateway_resources` | Gateway 的 CPU、内存及其他资源 |
+| `safactory_resources` | Safactory 的 CPU、内存、GPU 及其他资源 |
+| `rjob_namespace` | 工作负载所在 namespace |
+| `charged_group` | RJob 配额或计费组 |
 
-### 7.2 建议对象布局
+调用方不能覆盖 image 或资源配置。Server 必须在 Job 记录中保存两个工作负载实际使用的 image 引用。
 
-具体 bucket 名由部署环境配置，建议每个 Job 使用不可与其他 Job 重叠的前缀：
+### 7.2 Gateway RJob 提交
+
+Gateway RJob 至少包含：
+
+- 可幂等重建的 RJob 名称，建议由 `job_id` 派生；
+- Gateway base image；
+- `job_id` label/env；
+- 由 `model_id` 解析的模型路由配置引用；
+- listen port 和 health/readiness 配置；
+- 资源、超时、日志和自动清理策略；
+- 数据平台所需的部署级配置引用。
+
+RJob 创建成功只表示工作负载已提交，不表示 Gateway 可用。Server 必须继续完成地址发现和健康检查。
+
+### 7.3 Gateway 地址发现
+
+Server 必须从 RJob 平台取得 Safactory 容器可访问的网络信息：
+
+- 优先使用平台提供的集群内 DNS/Service 地址；
+- 仅在平台明确保证 IP 生命周期和可路由性时使用 Pod/worker IP；
+- 地址不得使用 `127.0.0.1` 或 `localhost`；
+- Server 使用地址和配置端口组成 Gateway URL；
+- Gateway URL 必须通过健康检查后才能传给 Safactory；
+- 实际地址、端口、URL 和发现时间必须写入 Job 记录。
+
+### 7.4 Safactory RJob 提交
+
+Safactory RJob 至少包含：
+
+- Safactory base image；
+- `job_id`、`model_id` 和已验证的 Gateway URL；
+- YAML/`dataset.jsonl` 的 mount 配置；
+- Safactory entrypoint/CLI 参数；
+- cloud storage 模式及 `wt-data-platform-sdk` 部署级配置；
+- 资源、运行超时、日志和自动清理策略。
+
+提交前必须再次确认 Gateway 仍处于 ready 状态。Safactory RJob 创建后，Server 保存 RJob ID 并进入运行状态轮询。
+
+## 8. YAML 与 dataset.jsonl 文件管理
+
+### 8.1 管理目标
+
+后端必须提供统一文件管理能力，使 Job Server 不依赖仓库内临时文件或人工拼接路径。该能力可以是 Server 内部模块，也可以是独立文件服务，但对 Job Server 必须提供稳定的元数据接口。
+
+文件管理系统负责：
+
+1. 维护 `range_id` 对应的 YAML 和 `dataset.jsonl` 模板；
+2. 创建 Job 时校验两个文件存在、格式有效且版本兼容；
+3. 为 `job_id` 建立不可变文件绑定；
+4. 必要时渲染 Job 专属 YAML，使 dataset 路径指向容器内 mount 路径；
+5. 将文件发布到 RJob 集群可访问的共享存储；
+6. 返回 mount source、target、文件版本和 checksum；
+7. 提供按 `job_id` 查询绑定的内部能力，供重启恢复和审计使用。
+
+### 8.2 文件映射
+
+逻辑映射如下：
 
 ```text
-s3://<bucket>/<environment>/jobs/<job_id>/
-├── manifest.json
-├── input/
-│   ├── range-manifest.json
-│   └── ...
-├── sessions/
-│   ├── index.json
-│   └── <session_id>/
-│       ├── result.json
-│       ├── steps/
-│       │   ├── index.json
-│       │   └── <step_id>.json
-│       └── completion.json
-└── diagnostics/
-    └── execution-summary.json
+range_id
+  -> yaml_template_version
+  -> dataset_version
+  -> create job_id binding
+       -> rendered config.yaml
+       -> dataset.jsonl
+       -> mount source / target
+       -> checksums
 ```
 
-API 与 S3 对象的对应关系：
+推荐把两个文件放在同一个只读 mount 目录，并让 YAML 使用相对 dataset 路径：
 
-| API 查询 | S3 数据对象 |
+```text
+<shared-storage>/safactory/jobs/<job_id>/
+├── config.yaml
+└── dataset.jsonl
+
+容器内：
+/mnt/safactory-job/config.yaml
+/mnt/safactory-job/dataset.jsonl
+```
+
+这里的目录只是启动文件管理布局，不是运行结果的数据前缀。Session、trajectory 和 score 仍写入数据平台共享表。
+
+### 8.3 发布与 mount 规则
+
+- mount source 必须位于 RJob 集群可访问的共享存储，不能是 Server 的本地临时路径；
+- YAML 和 JSONL 在提交 Safactory RJob 前必须完成 schema/语法校验；
+- YAML 中引用的 dataset 路径必须能在容器内解析到已 mount 文件；
+- mount 对 Safactory worker 默认只读；
+- Job 运行期间文件不得原地修改或删除；
+- 文件发布必须原子化，禁止 Safactory 读取到只写入一半的文件；
+- 文件版本和 checksum 必须写入 Job 记录；
+- 文件中不得写入 RJob AK/SK、模型密钥或数据平台明文凭据；
+- 文件保留与清理由统一策略管理，不与 RJob 删除操作绑定。
+
+## 9. 运行数据与 API 查询
+
+### 9.1 数据边界
+
+- 运行数据由 Safactory/Gateway 通过既有链路写入 `wt-data-platform-sdk` 管理的共享 landing/serving 表；
+- `job_id` 是共享表中的任务标识和查询条件，不代表独立 S3 前缀或独立表；
+- Control DB 只保存 Job/RJob/文件绑定状态，不保存 trajectory 或 score 副本；
+- YAML/JSONL 文件管理系统只保存启动输入，不作为运行结果来源。
+
+### 9.2 API 查询映射
+
+| API 查询 | SDK 查询方式 |
 |---|---|
-| Job 的 Session ID 列表 | `sessions/index.json` |
-| Session 结果与得分 | `sessions/<session_id>/result.json` |
-| Session step 数和 step ID | `sessions/<session_id>/steps/index.json` |
-| 指定 step 的 trajectory | `sessions/<session_id>/steps/<step_id>.json` |
+| Job 的 Session ID 列表 | 按精确 `job_id` 查询，并对非空 `session_id` 去重 |
+| Session 结果与得分 | 按 `job_id + session_id` 查询完成状态和 reward |
+| Session step 列表 | 按 `job_id + session_id` 查询并按 step 顺序排序 |
+| 指定 step trajectory | 按 `job_id + session_id + step_id` 精确查询并归一化字段 |
 
-对象 key 只允许由服务端依据已校验的 ID 和控制面记录生成，不得直接拼接未经校验的 query 参数。
+查询要求：
 
-### 7.3 写入与发布规则
+- Server 必须通过 SDK 公共接口查询，不绕过 SDK 直接读取 dldb/S3；
+- 每次查询必须包含精确 `job_id` 条件；
+- 先校验调用方对 Job 的访问权，再查询共享表；
+- `job_id` 过滤是数据选择条件，不是底层鉴权机制；
+- 运行中的 Job 允许暂时返回空 Session 列表、空 step 列表或未完成得分；
+- SDK 超时、权限或解码错误必须映射为 API 文档中的稳定错误；
+- API 返回前必须过滤密钥、内部地址、mount 路径和 SDK 连接信息。
 
-- 数据对象先写入，校验成功后再更新对应索引；API 只返回已经进入索引的数据；
-- `sessions/index.json` 和 `steps/index.json` 必须带单调递增的 `version`、`updated_at` 和内容校验信息；
-- 索引更新必须使用条件写入、版本号或等价机制，防止并发覆盖；
-- trajectory 对象一经发布不得原地改写；修正必须写入新版本并由索引显式指向；
-- `sealed=false` 表示后续仍可能追加，`sealed=true` 后禁止继续增加成员；
-- `step_count` 必须等于 step 索引中的项目数；
-- 最终 `manifest.json` 必须记录输入版本、Session 数、终态、停止原因、对象校验和及完成时间；
-- 写入失败时不得发布指向不存在或校验失败对象的索引。
-
-### 7.4 读取与一致性规则
-
-- API 每次查询都从 S3 读取已发布索引或对象；允许使用短时缓存，但缓存不得成为真相源；
-- Job 运行中，Session 列表和 step 列表只允许追加，不得移除或重新排序已经返回的项目；
-- 对尚未发布的数据，API 按现有接口约定返回空列表、`pending`/`running` 或可重试响应；
-- S3 超时、权限错误或对象损坏必须可区分记录；对外按照 API 文档映射为稳定错误；
-- 终态 Job 的清单与所有 `sealed=true` 索引必须可重复读取并得到一致结果。
-
-### 7.5 权限与保留
-
-- 每个 Job 使用最小权限的短期凭据，只允许读取指定输入前缀、写入指定输出前缀；
-- Safactory worker 与 Gateway 执行单元不得获得列举整个 bucket 或访问其他 Job 前缀的权限；
-- API 使用服务端身份读取对象，但读取前必须完成资源归属校验；
-- S3 默认启用服务端加密，敏感部署应使用 KMS 独立密钥；
-- 保留周期和生命周期策略由环境配置，删除任务不在当前公开 API 范围内；
-- 凭据、签名 URL、Authorization、Cookie 和模型密钥不得写入 trajectory 或日志。
-
-## 8. 功能需求
-
-### FR-01 查询模型与创建 Job
-
-- 模型列表和创建字段遵循 API 文档；
-- 创建时重新校验 `model_id`、`range_id` 以及二者兼容性；
-- 创建请求同步持久化后返回 `202 Accepted`，不等待 Gateway 或 worker 启动；
-- 新 Job 初始状态为 `queued`；
-- 创建失败不得遗留执行进程或可被查询为有效的半成品 Job。
-
-### FR-02 Job 调度
-
-Scheduler 必须：
-
-1. 按优先级和创建时间领取 `queued` Job；
-2. 使用数据库 lease 和 fencing token 保证同一 Job 只有一个有效调度者；
-3. 在启动前检查项目配额、Gateway 资源、worker 资源和 S3 可用性；
-4. 原子预留一个 Gateway 执行单元和一个 Safactory worker 的容量；
-5. 持久化执行单元标识、启动尝试号和 heartbeat；
-6. 只有持有当前 fencing token 的执行实例可以更新 Job 状态或发布 S3 最终清单；
-7. 失败后按错误类型决定有限重试或直接失败，不得无限启动新进程；
-8. Job 进入终态或停止后释放调度配额。
-
-### FR-03 启动专属 Gateway 执行单元
-
-启动顺序必须为：生成配置快照、启动 Gateway、启动 gateway worker、完成健康检查。只有 Gateway 执行单元就绪后才能启动 Safactory worker。
-
-Gateway 配置至少包含：
-
-- `job_id` 和启动尝试号；
-- `model_id` 对应的受信任模型路由；
-- 仅该 Job 可用的访问凭据；
-- S3 输出前缀与短期凭据引用；
-- 超时、并发和日志脱敏策略；
-- 心跳、健康检查和停止参数。
-
-任何 Job 都不得修改另一个 Job 的 Gateway 配置。Gateway 启动失败时 Job 应停留在可诊断的失败阶段，并清理已启动的子进程。
-
-### FR-04 启动专属 Safactory worker
-
-Safactory worker 必须在独立进程、容器或 Pod 中运行，且启动时接收不可变配置快照。启动参数至少包含：
-
-- `job_id`、`model_id`、`range_id` 和 attempt；
-- 专属 Gateway 地址与鉴权引用；
-- S3 输入前缀、输出前缀和最小权限凭据引用；
-- Job 超时、Session/step 上限和资源限制；
-- 当前 fencing token 或等价写入授权。
-
-worker 启动后必须先读取并验证 S3 输入清单，再进入 Safactory `SimulationFlow`。输入缺失、版本不匹配或校验失败时不得继续运行。
-
-### FR-05 Session 与运行数据持久化
-
-- 新 Session 创建后必须先写入其基础对象，再追加到 `sessions/index.json`；
-- 每个 step 完成后应尽快写入独立 trajectory 对象并更新 step 索引；
-- 结果与得分完成后写入 `result.json`；
-- Session 完成时写入 `completion.json` 并将 step 索引设为 `sealed=true`；
-- Job 完成或停止时写入最终 `manifest.json`；
-- Safactory worker 无法在强制终止前完成封存时，由持有当前 fencing token 的 Job finalizer 写入停止清单并标记数据不完整；
-- S3 写入不得阻塞 heartbeat；持续失败达到策略阈值时任务以存储错误结束。
-
-### FR-06 查询 Session、结果和轨迹
-
-- 查询接口的参数、返回结构和轮询语义遵循 API 文档；
-- 控制面负责校验 Job 存在性以及 Session、Step 的归属关系；
-- 业务数据从第 7.2 节对应的 S3 对象读取并归一化返回；
-- Job 运行中允许 Session 或 step 尚未产生；
-- 已返回的 Session ID、Step ID 和顺序不得在后续查询中变化；
-- API 必须过滤密钥、鉴权信息、内部 S3 key、宿主机路径等敏感信息。
-
-### FR-07 停止 Job
-
-停止操作必须满足：
-
-- 只有持有控制权限的内部服务或运维角色可以发起；
-- `queued` Job 停止后不启动 Gateway 或 Safactory worker；
-- `preparing` Job 停止时中断后续启动并清理已经创建的部分资源；
-- `running` Job 进入 `stopping`，不再创建新 Session；
-- 首先向 Safactory worker 发出协作式停止，再依次升级为 `SIGTERM` 和强制终止；
-- Gateway 执行单元必须在 Safactory worker 退出或被强制终止后再关闭；
-- 已持久化到 S3 且已经发布到索引的数据继续可查询；
-- 未完整写入的数据不得出现在已发布索引中；
-- 最终清单记录 `stopped`、停止来源、原因、请求时间、完成时间和数据是否完整；
-- 重复停止返回相同操作结果，不重复发送危险信号或覆盖第一次停止原因；
-- 已处于 `succeeded`、`failed` 或 `stopped` 的 Job 不得重新进入运行态。
-
-### FR-08 超时与自动停止
-
-- Job 必须有最大排队时长、启动时长、运行时长和停止宽限期；
-- 任一超时触发与人工停止相同的资源回收流程；
-- 超时原因必须明确区分 `QUEUE_TIMEOUT`、`STARTUP_TIMEOUT`、`RUN_TIMEOUT` 和 `STOP_TIMEOUT`；
-- 强制终止后仍需尝试发布部分结果清单，但不得伪装为完整成功；
-- 存在无法回收的进程或资源时必须产生告警并进入孤儿清理队列。
-
-### FR-09 故障恢复与孤儿清理
-
-- Scheduler 必须周期性扫描 heartbeat 过期且 lease 已失效的 Job；
-- fencing token 失效的旧 worker 不得继续更新控制面状态或发布最终清单；
-- MVP 不要求从中间 step 恢复执行；worker 失联后 Job 进入 `failed` 或执行停止清理；
-- 清理器根据持久化的进程、容器或 Pod 标识回收 Safactory worker、gateway worker 和 Gateway；
-- 清理流程必须幂等，可在 Scheduler 重启后继续；
-- 不得因为控制面重启删除已经成功写入 S3 的运行数据。
-
-### FR-10 可观测性与审计
-
-系统至少记录以下结构化事件：
-
-- Job created/claimed；
-- Gateway starting/ready/failed/stopped；
-- gateway worker starting/ready/failed/stopped；
-- Safactory worker starting/running/failed/stopped；
-- Session discovered/completed；
-- S3 object published/read failed；
-- stop requested/grace expired/force killed/completed；
-- lease lost/orphan detected/orphan cleaned；
-- Job succeeded/failed/stopped。
-
-所有日志必须携带 `request_id`、`job_id`、attempt、worker ID；涉及 Session 或 step 时同时携带对应 ID。
-
-## 9. 调度与执行时序
+## 10. 调度与执行时序
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant A as Job API
+    participant S as Job Server
     participant D as Control DB
-    participant S as Scheduler
-    participant G as Job Gateway Unit
+    participant F as File Manager
+    participant R as RJob Platform
+    participant G as Gateway worker
     participant W as Safactory worker
-    participant O as S3
+    participant P as wt-data-platform-sdk
 
-    C->>A: POST /v1/jobs
-    A->>D: create queued Job
-    A-->>C: 202 + job_id
-    S->>D: claim with lease + fencing token
-    S->>O: validate input manifest / allocate prefix
-    S->>G: start Gateway + gateway worker
+    C->>S: POST /v1/jobs (model_id, range_id)
+    S->>D: create queued Job
+    S-->>C: 202 + job_id
+
+    S->>F: resolve range_id and bind files to job_id
+    F-->>S: YAML/JSONL mount metadata + checksums
+    S->>D: save file binding
+
+    S->>R: create Gateway RJob (gateway base image)
+    R-->>S: gateway_rjob_id
+    S->>R: poll status and network address
+    R-->>S: cluster IP/DNS + port
+    S->>G: health/readiness check
     G-->>S: ready
-    S->>W: start dedicated worker
-    W->>O: read range input
-    W->>G: execute model calls
-    loop Session and steps
-        W->>O: publish trajectory and indexes
-    end
-    W->>O: publish result and final manifest
-    W-->>S: exit
-    S->>G: stop gateway worker + Gateway
-    S->>D: write terminal state
-    C->>A: query sessions/result/steps/trajectory
-    A->>D: validate ownership and locate object
-    A->>O: read published object
-    A-->>C: normalized response
+
+    S->>R: create Safactory RJob (safactory base image, mounts, Gateway URL)
+    R-->>S: safactory_rjob_id
+    S->>D: save RJob IDs and running state
+
+    W->>F: read mounted YAML and dataset.jsonl
+    W->>G: model/session requests
+    G->>P: write trajectory data with job_id
+    W->>P: write result/reward with job_id
+
+    S->>R: poll Safactory/Gateway status
+    R-->>S: terminal status
+    S->>D: write Job terminal state
+
+    C->>S: query sessions/result/steps/trajectory
+    S->>P: SDK query with job_id filters
+    P-->>S: rows
+    S-->>C: normalized API response
 ```
 
-启动过程中的任何失败都必须按与启动相反的顺序回滚已创建资源。
+## 11. 状态模型
 
-## 10. 状态模型
+### 11.1 对外 Job 状态
 
-### 10.1 内部 Job 状态
+对外状态必须保持 API 文档定义：
 
-| 状态 | 是否终态 | 说明 |
-|---|---:|---|
-| `queued` | 否 | 已持久化，等待调度。 |
-| `preparing` | 否 | 校验 S3 输入、创建凭据、启动 Gateway 执行单元。 |
-| `running` | 否 | 专属 Safactory worker 正在运行。 |
-| `stopping` | 否 | 已收到停止命令，正在停止进程、封存数据和回收资源。 |
-| `succeeded` | 是 | worker 正常完成，S3 最终清单和必要索引已成功封存。 |
-| `failed` | 是 | 启动、执行、存储或基础设施故障导致任务失败。 |
-| `stopped` | 是 | 人工、策略或超时触发停止，资源回收流程已完成。 |
+| 状态 | 说明 |
+|---|---|
+| `queued` | Job 已持久化，尚未开始文件解析或 RJob 提交。 |
+| `preparing` | 正在绑定文件、启动 Gateway、发现地址或启动 Safactory。 |
+| `running` | Safactory RJob 已创建并正在运行。 |
+| `succeeded` | Safactory RJob 成功结束。 |
+| `failed` | 文件、Gateway、Safactory、RJob 平台或数据依赖失败。 |
 
-```mermaid
-stateDiagram-v2
-    [*] --> queued
-    queued --> preparing: claimed
-    queued --> stopped: stop
-    preparing --> running: Gateway and worker ready
-    preparing --> stopping: stop or timeout
-    preparing --> failed: startup failure
-    running --> succeeded: execution and S3 seal completed
-    running --> failed: execution or storage failure
-    running --> stopping: stop or timeout
-    stopping --> stopped: data sealed and resources released
-    stopping --> failed: cleanup cannot complete
-```
+### 11.2 内部阶段
 
-### 10.2 内部阶段
-
-`phase` 用于定位进度和错误，不作为独立状态机：
+`phase` 用于精确定位启动进度：
 
 - `validating_request`
-- `waiting_for_capacity`
-- `validating_s3_input`
-- `starting_gateway`
-- `starting_gateway_worker`
-- `starting_safactory_worker`
-- `running_simulation`
-- `persisting_session`
-- `evaluating`
-- `sealing_s3_data`
-- `stopping_safactory_worker`
-- `stopping_gateway_worker`
-- `stopping_gateway`
-- `cleaning_up`
+- `resolving_job_files`
+- `submitting_gateway_rjob`
+- `waiting_gateway_address`
+- `checking_gateway_health`
+- `submitting_safactory_rjob`
+- `running_safactory`
+- `stopping_safactory_rjob`
+- `stopping_gateway_rjob`
+- `cleaning_rjobs`
 - `completed`
 
-### 10.3 对外状态兼容
+状态约束：
 
-现有 API 文档仅公开 `queued`、`preparing`、`running`、`succeeded` 和 `failed`。实现不得擅自向现有响应增加 `stopping` 或 `stopped` 枚举值。
+- Gateway 未 ready 时不得进入 `submitting_safactory_rjob`；
+- 只有 Safactory RJob 已创建后才能进入 `running`；
+- 终态不可逆；
+- RJob 状态未知时不得直接标记成功，应保留可恢复状态并继续对账；
+- Job Server 重启后根据 Job phase 和已保存 RJob ID 恢复轮询，不重复创建同角色 RJob。
 
-在停止接口和公开状态尚未写入 API 契约前：
+## 12. Control DB 数据模型要求
 
-- `stopping` 仍按非终态 `running` 对外展示；
-- `stopped` 按终态 `failed` 对外展示，并在允许的 `error` 字段中提供非敏感停止摘要；
-- 内部状态和 S3 最终清单必须保留真实的 `stopping`/`stopped` 语义。
-
-后续若公开停止接口，应同步扩展 API 状态枚举和稳定错误码，客户端升级后再直接暴露 `stopping`/`stopped`。
-
-## 11. 控制面数据模型要求
-
-### 11.1 `jobs`
+### 12.1 `jobs`
 
 至少保存：
 
 - `job_id`、`model_id`、`range_id`；
-- 原始请求摘要和不可变配置 hash；
-- internal status、public status、phase 和 status reason；
-- S3 bucket/prefix 逻辑引用、输入版本和最终 manifest key；
-- Scheduler lease、heartbeat、fencing token 和 attempt；
-- Gateway、gateway worker、Safactory worker 的实例标识和退出码；
-- stop requested/source/reason/requested_at/completed_at；
-- error code、错误摘要和失败阶段；
-- created/started/updated/finished 时间；
-- 乐观锁 version。
+- public status、internal phase、status reason；
+- YAML/JSONL 文件版本、checksum、mount 元数据引用；
+- Gateway/Safactory base image 引用；
+- `gateway_rjob_id`、`safactory_rjob_id`；
+- Gateway IP/DNS、port、URL 和 ready 时间；
+- 两个 RJob 的状态、退出码和失败摘要；
+- 创建、启动、完成和更新时间；
+- 编排 attempt 和乐观锁 version。
 
-不得保存可被查询接口直接当作完整 trajectory 或最终 score 返回的大字段。
+不得保存完整 trajectory、模型输入输出或最终 score 副本。
 
-### 11.2 `job_sessions`
+### 12.2 `job_events`
 
-作为归属与 S3 定位索引，至少保存：
+保存以下内部事件：
 
-- `job_id`、`session_id`；
-- Session S3 prefix；
-- 当前 result status 和 `sealed` 摘要；
-- 首次发布和完成时间；
-- 对应的 worker attempt 与 fencing token。
+- Job created；
+- files resolved/bound/validation failed；
+- Gateway RJob submitted/address discovered/ready/failed/deleted；
+- Safactory RJob submitted/running/succeeded/failed/deleted；
+- RJob reconciliation started/completed；
+- data-platform query failed；
+- Job succeeded/failed；
+- cleanup requested/completed/failed。
 
-该表用于授权、归属校验和定位，不替代 S3 中的 Session 业务数据。
+事件用于审计和排障，不作为当前状态的唯一来源。
 
-### 11.3 `process_instances`
+## 13. 功能需求
 
-至少保存：
+### FR-01 API Server
 
-- `job_id`、attempt、实例类型；
-- Gateway/gateway worker/Safactory worker 的进程、容器或 Pod 标识；
-- desired state、actual state、heartbeat；
-- started/exited/cleaned 时间和退出原因。
+- Server 实现 API 文档定义的模型、创建 Job、Session、结果、step 和 trajectory 接口；
+- 创建接口只持久化并排队，不同步等待两个 RJob 启动；
+- API 进程不得执行 Safactory 或 Gateway 业务代码；
+- 所有响应和错误码遵循 API 文档。
 
-### 11.4 `job_events`
+### FR-02 文件解析与绑定
 
-保存调度、状态变更、停止、强制终止、孤儿清理和管理员操作。事件用于审计和排障，不作为当前状态的唯一来源。
+- 根据 `range_id` 唯一解析可用的 YAML 和 `dataset.jsonl` 版本；
+- 校验 YAML、JSONL、dataset 引用和 mount 可用性；
+- 为 `job_id` 建立不可变绑定；
+- 失败时 Job 进入 `failed` 且不创建 Gateway RJob。
 
-## 12. 非功能需求
+### FR-03 Gateway RJob
 
-### 12.1 隔离与资源治理
+- 从受信任 Gateway base image 创建；
+- 将 `model_id` 转换为服务端可信路由配置；
+- 保存 RJob ID 并轮询状态；
+- 获取集群可路由地址并完成健康检查；
+- 超时或失败时不创建 Safactory RJob。
 
-- 每个运行 Job 固定占用一套 Gateway 执行单元和一个 Safactory worker 配额；
-- 调度容量按完整执行单元计算，任一资源不足时 Job 保持排队；
-- 进程、容器或 Pod 必须设置 CPU、内存、文件描述符和最大运行时间限制；
-- 端口、临时目录、服务名和日志流必须按 Job 隔离；
-- 一个执行单元故障不得终止或修改其他 Job。
+### FR-04 Safactory RJob
 
-### 12.2 可用性与一致性
+- 仅在 Gateway ready 后从受信任 Safactory base image 创建；
+- mount 当前 Job 的 YAML 和 `dataset.jsonl`；
+- 注入 `job_id`、Gateway URL、模型和 SDK 配置；
+- 保存 RJob ID 并轮询到终态；
+- Safactory 成功退出后更新 Job 为 `succeeded`，否则为 `failed`。
 
-- API 或 Scheduler 重启不得丢失已接受 Job；
-- 同一 Job 只能由当前 fencing token 持有者写终态；
-- Job 终态不可逆；
-- S3 已发布索引只能单调追加，封存后不可变；
-- worker 失联后必须在可配置时间内进入失败或停止清理，不能永久保持 `running`；
-- 所有清理操作可重入、可重试。
+### FR-05 查询数据
 
-### 12.3 性能目标
+- 业务查询全部调用 `wt-data-platform-sdk`；
+- 所有 SDK 查询包含 `job_id`，并按接口需要增加 `session_id`、`step_id`；
+- 数据尚未产生时遵循 API 文档的轮询语义；
+- worker 已删除后，已写入数据仍然可查询。
+
+### FR-06 恢复与清理
+
+- Server 重启后扫描非终态 Job；
+- 使用已保存的 RJob ID 查询真实状态；
+- 若 Gateway 已 ready 但 Safactory 尚未创建，则继续创建 Safactory；
+- 若 RJob 已存在，不得因为重启重复创建相同角色工作负载；
+- 终态或失败后按顺序清理 Safactory、Gateway；
+- 清理必须幂等，并允许后台重试。
+
+## 14. 非功能需求
+
+### 14.1 可用性与一致性
+
+- Server 重启不得丢失已接受 Job；
+- Job 状态、RJob ID、文件绑定和 Gateway 地址必须持久化；
+- RJob 创建使用可重放的幂等名称或请求键；
+- 同一 Job 同一角色最多有一个有效 RJob；
+- 文件绑定一旦用于提交 Safactory RJob 就不可修改；
+- 终态 Job 不得重新进入运行态。
+
+### 14.2 性能目标
 
 | 指标 | MVP 目标 |
 |---|---|
-| 创建 Job API P95 | 小于 300 ms，不含外部依赖异常重试 |
-| 查询接口 API P95 | 小于 500 ms，不含 S3 跨区域异常 |
-| Job 接受后可见性 | 小于 1 秒 |
-| 有容量时调度启动延迟 P95 | 小于 5 秒 |
-| worker heartbeat 间隔 | 不大于 10 秒 |
-| 正常状态更新延迟 | 小于 5 秒 |
-| 停止命令持久化 | 小于 2 秒 |
+| 创建 Job API P95 | 小于 300 ms，不包含依赖异常重试 |
+| 查询接口 API P95 | 小于 500 ms，不包含数据平台异常 |
+| Job 创建后状态可见性 | 小于 1 秒 |
+| Gateway ready 后提交 Safactory 延迟 | 小于 5 秒 |
+| RJob 状态轮询间隔 | 可配置，默认不大于 10 秒 |
 
-模型推理、靶场执行和大对象传输耗时不计入 API 本身延迟目标。
+模型推理、RJob 排队、image 拉取、YAML/JSONL mount 和靶场运行耗时不计入 API 本身延迟。
 
-### 12.4 默认可配置限制
+### 14.3 安全
 
-- 全局和项目级运行 Job 数；
-- 单 Job Session 数与 step 数；
-- 排队、启动、运行和停止宽限期；
-- 单 trajectory 对象大小和 Job 总数据量；
-- S3 写入重试次数、退避和请求超时；
-- Gateway 与 Safactory worker 的 CPU、内存和并发限制；
-- 数据保留周期。
+- RJob AK/SK、registry 凭据、模型密钥和 SDK/S3 凭据只由 Server/部署环境管理；
+- 调用方只能提交 `model_id + range_id`，不能覆盖 image、命令、mount 或凭据；
+- 文件模板和 mount source 必须来自受信任配置；
+- Gateway 地址只用于内部编排，不在公开 API 中返回；
+- API 查询先做 Job 访问控制，再调用 SDK；
+- 日志、事件和错误响应不得包含密钥、完整 mount source 或内部凭据。
 
-### 12.5 安全
+### 14.4 可观测性
 
-- `model_id` 和 `range_id` 只引用服务端受信任配置；
-- 调用方不得提交本地路径、shell command、容器启动参数或 S3 凭据；
-- Job 短期凭据必须在任务完成或停止后失效；
-- API 查询必须校验 Job、Session 和 Step 归属，防止跨 Job 越权读取；
-- 日志和 S3 数据写入前必须脱敏；
-- 停止、强制终止和权限变更必须审计。
+所有编排日志至少携带：
 
-## 13. 错误分类
+- `request_id`；
+- `job_id`；
+- phase；
+- orchestrator attempt；
+- Gateway/Safactory RJob ID；
+- image 引用；
+- 耗时和稳定错误分类。
+
+涉及 Session 或 step 的查询日志还应携带对应 ID，但不得记录完整 trajectory。
+
+## 15. 错误分类
 
 | 类别 | 典型错误 | 处理原则 |
 |---|---|---|
-| 请求与元数据 | 模型不存在、靶场不存在、组合不支持 | 创建失败，不启动执行单元。 |
-| 调度 | 配额不足、lease 丢失、容量预留失败 | 保持排队或有限重试。 |
-| S3 输入 | 对象不存在、版本不匹配、checksum 错误 | 不运行 Safactory，记录输入错误。 |
-| Gateway | Gateway 或 gateway worker 启动/健康检查失败 | 回滚执行单元，Job 失败。 |
-| Safactory worker | 启动失败、异常退出、SimulationFlow 错误 | 封存已有数据，清理资源。 |
-| S3 输出 | 写入超时、权限拒绝、索引发布冲突 | 有限重试；不得回退本地结果。 |
-| 停止 | 宽限期超时、信号失败、孤儿进程残留 | 强制终止并告警，继续幂等清理。 |
-| 控制面 | heartbeat 超时、fencing token 失效 | 拒绝旧实例写入，进入恢复扫描。 |
+| 请求与元数据 | 模型不存在、靶场不存在、组合不支持 | 创建失败，不进入调度。 |
+| 文件管理 | YAML/JSONL 不存在、格式错误、版本不匹配、mount 不可用 | 不创建 Gateway RJob，Job 失败。 |
+| RJob 平台 | 鉴权失败、配额不足、提交失败、状态查询失败 | 有限重试；无法恢复时 Job 失败。 |
+| Gateway | image 拉取失败、启动失败、无可路由地址、健康检查失败 | 不创建 Safactory，清理 Gateway。 |
+| Safactory | image 拉取失败、mount 失败、配置加载失败、异常退出 | 保留已写数据，清理 Safactory 与 Gateway。 |
+| 数据平台 | SDK 查询超时、权限拒绝、数据解码失败 | 查询返回稳定依赖错误，不回退本地结果。 |
+| 清理 | RJob 停止/删除失败 | 记录告警并进入幂等清理队列。 |
 
-对外错误结构与稳定错误码以 API 文档为准；内部错误必须映射后返回，不得泄露堆栈、凭据、内部地址或 S3 物理 key。
+对外错误必须映射为 API 文档中的稳定错误码，不得泄露 RJob 平台响应、内部 IP、凭据或物理存储路径。
 
-## 14. MVP 验收标准
+## 16. MVP 验收标准
 
-### 14.1 创建与调度
+### 16.1 API 与异步创建
 
-- 使用有效 `model_id + range_id` 创建 Job，返回 `202` 和唯一 `job_id`；
-- API 返回后不在请求进程中继续运行 Safactory；
-- 有容量时 Scheduler 只领取一次 Job，并持久化 lease 和 fencing token；
-- 资源不足时不只启动 Gateway 或只启动 Safactory worker，Job 保持可诊断的排队状态。
+- 六个 API 均由同一个 Server 提供；
+- 使用有效 `model_id + range_id` 创建 Job，立即返回 `202` 和唯一 `job_id`；
+- HTTP 请求结束后由后台编排器继续执行，不阻塞调用方；
+- 无效模型、靶场或文件模板不会创建 RJob。
 
-### 14.2 每 Job 独占执行单元
+### 16.2 两个 RJob 的顺序
 
-- 同时运行两个 Job 时可以观察到两套不同的 Gateway/gateway worker 和两个不同的 Safactory worker；
-- 两个 Job 的 Gateway 地址、模型配置、临时目录、凭据和 S3 前缀彼此隔离；
-- 任一 Job 的执行单元退出不影响另一 Job；
-- Safactory worker 只能连接本 Job 的 Gateway，无法访问另一 Job 的 S3 前缀。
+- 每个 Job 使用 Gateway base image 和 Safactory base image 各创建一个 RJob；
+- 可以证明 Gateway RJob 总是先创建；
+- Gateway 未取得集群可路由地址或 health 未通过时，Safactory RJob 不会创建；
+- Safactory RJob 收到的 Gateway URL 等于 Server 发现并验证的地址；
+- 两个 RJob ID、image 和终态均可从 Job 记录审计。
 
-### 14.3 S3 数据闭环
+### 16.3 文件管理与 mount
 
-- worker 仅从 S3 读取靶场运行输入；
-- 每个已返回 Session 都存在对应 S3 Session 对象；
-- 每个已返回 step 都存在唯一 trajectory 对象，`step_count` 与索引长度一致；
-- result 接口返回的得分来自 S3 `result.json`；
-- Gateway 和 Safactory worker 停止后，现有 API 仍能从 S3 返回已封存数据；
-- 删除 worker 本地临时目录后不影响已完成 Job 的结果查询；
-- S3 不可用时查询返回可诊断错误，不读取控制面副本伪造成功结果。
+- `range_id` 能解析到一份有效 YAML 和一份 `dataset.jsonl`；
+- 创建 Job 后能按 `job_id` 查询对应文件版本、checksum 和 mount 元数据；
+- Safactory 容器内能以只读方式读取两个文件；
+- YAML 中 dataset 路径正确指向已 mount 的 `dataset.jsonl`；
+- Job 运行期间修改模板不会影响该 Job 已绑定的文件；
+- mount 失败时 Safactory 明确失败，Gateway 随后被清理。
 
-### 14.4 停止与清理
+### 16.4 数据查询闭环
 
-- 停止 `queued` Job 不会创建任何执行进程；
-- 停止 `preparing` Job 会回滚已经启动的部分进程；
-- 停止 `running` Job 后不再创建新 Session；
-- 正常宽限期内 Safactory worker 先退出，Gateway 执行单元后退出；
-- 超过宽限期会强制终止，并记录使用的终止阶段；
-- 已发布 trajectory 和结果仍可查询，未完成对象不进入索引；
-- 重复发送停止命令不会重复覆盖原因或遗留额外进程；
-- Scheduler 重启后仍能完成未结束的停止和孤儿清理。
+- Safactory/Gateway 写入的每条运行数据都包含正确 `job_id`；
+- Session 列表通过 SDK 按 `job_id` 查询得到；
+- result 得分通过 SDK 从对应 Session 记录获得；
+- step 列表与 trajectory 通过 SDK 按 `job_id + session_id + step_id` 查询得到；
+- 删除两个 RJob 后，已写入的数据仍可查询；
+- SDK 不可用时返回可诊断错误，不读取本地文件或 Control DB 伪造结果。
 
-### 14.5 故障隔离
+### 16.5 故障恢复与清理
 
-- Gateway 启动失败时 Safactory worker 不启动；
-- Safactory worker 异常退出时专属 Gateway 被回收；
-- heartbeat/lease 失效后旧 worker 无法覆盖新状态或 S3 最终清单；
-- 一个 Job 的 S3 写入失败不会污染其他 Job 的索引或状态。
+- Gateway 失败时不会创建 Safactory；
+- Safactory 提交失败时 Gateway 被清理；
+- Safactory 运行中 Gateway 失败时两个 RJob 均被清理，Job 失败；
+- Server 在 Gateway ready 后、Safactory 提交前重启，恢复后只创建一个 Safactory RJob；
+- Server 在两个 RJob 运行期间重启，恢复后继续轮询原 RJob 而不重复创建；
+- 清理始终先 Safactory、后 Gateway，并可重复执行。
 
-## 15. 分阶段交付
+## 17. 分阶段交付
 
-### Phase 1：单机最小闭环
+### Phase 1：最小闭环
 
-- Control-plane DB 与持久化队列；
-- 单 Scheduler；
-- 每 Job 独立本地进程或容器：Gateway、gateway worker、Safactory worker；
-- S3 输入读取与 Session/result/trajectory 写入；
-- 现有六个 API 的查询闭环；
-- 内部停止、超时、heartbeat 和基本孤儿清理。
+- 单一 Job Server 与 Control DB；
+- RJob Client 集成；
+- 固定版本 Gateway/Safactory base image；
+- `range_id → YAML + dataset.jsonl` 文件映射和只读 mount；
+- Gateway 先启动、地址发现、health check、Safactory 后启动；
+- 六个 API 和 `wt-data-platform-sdk` 查询闭环；
+- 基础超时、失败清理和重启恢复。
 
 ### Phase 2：生产强化
 
-- PostgreSQL 等生产控制面数据库；
-- 容器或 Pod 级资源隔离；
-- 多 Scheduler、lease 与 fencing 故障注入；
-- S3 KMS、生命周期和跨可用区配置；
-- 完整配额、审计、告警和自动清理。
+- Job Server 多副本抢占与幂等编排；
+- 文件模板版本管理、审计、原子发布和保留策略；
+- image digest 管理、镜像预拉取和资源配额；
+- RJob 故障注入、清理队列和告警；
+- 完整访问控制和调用审计。
 
-### Phase 3：规模化能力
-
-- 多集群调度和容量感知；
-- Session/attempt 级重试；
-- 对外停止接口与更丰富的 Job 状态查询；
-- webhook 或事件推送；
-- 在不破坏隔离前提下评估可选的 warm pool。
-
-## 16. 风险与决策
+## 18. 风险与决策
 
 | 风险 | 影响 | 决策 |
 |---|---|---|
-| 每 Job 独占 Gateway 和 worker 启动成本较高 | 排队和启动耗时增加 | MVP 优先保证隔离；通过容量预留、镜像预拉取优化，不共享可变进程。 |
-| S3 短暂不可用 | 输入无法读取或运行数据无法发布 | 有限重试；不切换本地真相源，失败时保留诊断信息。 |
-| worker 在写索引时被强制终止 | 可能存在未被索引的孤立对象 | 先写对象后发布索引；查询只认索引，后台可清理孤立对象。 |
-| Gateway 先于 Safactory worker 退出 | 轨迹收尾或模型请求丢失 | 固定停止顺序：先 Safactory worker，后 gateway worker 和 Gateway。 |
-| Scheduler 重启导致重复启动 | 重复执行并产生冲突数据 | lease、attempt、fencing token 和唯一执行单元约束。 |
-| API 状态枚举暂不包含停止态 | 调用方无法区分停止与一般失败 | MVP 保留内部真实状态并兼容映射；公开停止时同步升级 API 契约。 |
-| 控制面缓存运行数据 | 与 S3 数据不一致 | 控制面只存索引指针和摘要，API 运行数据统一读 S3。 |
+| Gateway 地址发现慢或返回不可路由 IP | Safactory 无法访问 Gateway | 优先使用集群 DNS/Service；必须先 health check，再提交 Safactory。 |
+| 两个 RJob 并行创建 | Safactory 启动时没有有效 Gateway URL | 明确串行依赖，Gateway ready 是 Safactory 提交硬门槛。 |
+| YAML 与 JSONL 版本不一致 | Safactory 启动或任务执行失败 | 文件管理系统按版本成对发布，并为 Job 保存不可变 binding。 |
+| mount 使用 Server 本地路径 | RJob 容器读取不到文件 | mount source 必须位于集群可访问共享存储。 |
+| Server 重启导致重复创建 RJob | 同一 Job 重复运行 | 持久化 RJob ID 并使用幂等名称；恢复时先查询后创建。 |
+| Gateway 先于 Safactory 被删除 | 运行请求和轨迹收尾失败 | 固定清理顺序：先 Safactory、后 Gateway。 |
+| 把启动文件目录当作结果存储 | 数据来源混乱 | YAML/JSONL只用于启动输入；结果统一通过 SDK 查询。 |
+| 把 `job_id` 当作底层权限边界 | 共享表数据可能越权 | API先校验 Job访问权，再使用精确 `job_id` 条件查询 SDK。 |
 
-## 17. 待确认项
+## 19. 待确认项
 
-1. “每个任务”是否严格指每个 Job；本文按每个 Job 独占执行单元设计。
-2. Gateway 与 gateway worker 在部署上是两个独立进程/容器，还是一个部署单元内的两个组件？
-3. `range_id` 到 S3 输入清单的映射由工程中心直接返回，还是由 Job Server 本地配置维护？
-4. S3 bucket、区域、KMS key、默认保留周期和跨账号访问方式是什么？
-5. 单 Job 的 Session/step 上限、最大运行时长和停止宽限期是多少？
-6. 停止能力是否需要在 v1 对调用方公开；若需要，应单独更新 API 文档后实施。
-7. `stopped` 对外映射为 `failed` 是否满足当前调用方预期，还是需要立即扩展公开状态枚举？
+1. Gateway 和 Safactory base image 的 registry 地址、版本策略及 entrypoint 分别是什么？
+2. RJob 平台返回的是稳定 DNS/Service，还是 worker IP；对应字段和生命周期如何？
+3. Gateway health/readiness endpoint、监听端口和成功判定是什么？
+4. YAML 的准确 schema、Safactory 启动命令以及容器内约定路径是什么？
+5. `dataset.jsonl` 是按 `range_id` 共享只读版本，还是每个 Job都需要物化一份快照？
+6. 统一文件系统使用哪种 RJob 可访问存储，`mount_config` 的 source格式是什么？
+7. RJob 完成后的保留时长、自动删除策略和失败现场保留策略是什么？
+8. Server 重启恢复时，RJob 查询和幂等创建的具体接口能力是什么？
+9. 查询 API 统一读取 landing，还是终态后改读 serving；若改读 serving，可接受的发布延迟是多少？
