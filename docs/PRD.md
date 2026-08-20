@@ -12,9 +12,9 @@
 
 本文定义 Safactory Job Server 的产品边界、RJob 调度方式、Gateway 与 Safactory 工作负载的启动顺序、YAML/`dataset.jsonl` 文件管理、运行状态和查询数据链路。
 
-对外接口字段、路径、状态和错误响应以 [API_DESIGN.md](./API_DESIGN.md) 为准。本文只描述这些接口背后的服务与执行架构，不另行扩展公开接口。
+对外接口字段、路径、状态和错误响应以 [API_DESIGN.md](./API_DESIGN.md) 为准。
 
-本版本采用以下核心方案：
+核心方案：
 
 > 系统提供一个统一的 Job Server，对外实现 API 文档中的全部接口。创建 Job 后，Server 通过 RJob 平台依次从 Gateway base image 和 Safactory base image 创建两个独立工作负载：必须先启动 Gateway 并取得可被 Safactory 访问的网络地址，再启动 Safactory。Safactory 启动所需 YAML 配置和 `dataset.jsonl` 由统一文件管理系统按 `job_id` 解析并以只读 mount 方式注入。运行数据查询统一通过 `wt-data-platform-sdk` 完成。
 
@@ -22,7 +22,7 @@
 
 ## 2. 背景与问题
 
-Safactory 已具备基于 YAML 配置和 dataset 文件执行任务、经 Gateway 发起模型请求、生成 Session/trajectory 并把数据写入数据平台的能力。为了向外部调用方提供稳定服务，需要补齐以下能力：
+Safactory 基于 YAML 配置和 dataset 文件执行任务，经 Gateway 发起模型请求，生成 Session/trajectory 并把数据写入数据平台。Job Server 提供以下能力：
 
 - 用一个长期运行的 Server 承载 API 文档中的六个接口；
 - 将 HTTP 请求与异步 RJob 执行解耦；
@@ -30,36 +30,29 @@ Safactory 已具备基于 YAML 配置和 dataset 文件执行任务、经 Gatewa
 - 保证 Gateway 先就绪，并将其集群内可访问地址传给 Safactory；
 - 统一管理 Safactory 所需 YAML 和 `dataset.jsonl`，建立稳定的 `job_id` 文件映射；
 - 在 Server 重启后根据持久化的 RJob ID 恢复任务状态；
-- 通过 `wt-data-platform-sdk` 查询 Session、得分和轨迹，不从 worker 内存或本地文件读取结果。
+- 通过 `wt-data-platform-sdk` 查询 Session、得分和轨迹。
 
-## 3. 产品目标与非目标
+## 3. 产品目标与范围
 
 ### 3.1 MVP 目标
 
 1. 部署一个 Safactory Job Server，实现 [API_DESIGN.md](./API_DESIGN.md) 定义的所有接口。
 2. 使用 `model_id + range_id` 创建异步 Job，并立即返回 `202 Accepted` 和 `job_id`。
-3. Job 调度统一通过 RJob 平台完成，Server 不在本机直接启动 Gateway 或 Safactory 进程。
+3. Job 调度统一通过 RJob 平台完成，Server 负责提交、轮询和清理 RJob。
 4. 提供可被 RJob 拉取的 Gateway base image 和 Safactory base image，并记录实际使用的不可变版本或 digest。
 5. 每个 Job 先创建一个 Gateway RJob；仅当 Gateway 地址已取得且健康检查通过后，才创建 Safactory RJob。
 6. 创建 Safactory RJob 时，把 `job_id`、模型信息、Gateway URL、YAML 和 `dataset.jsonl` mount 信息传入工作负载。
 7. 统一文件管理系统维护 `range_id → 文件模板` 和 `job_id → 已解析文件版本` 的映射。
-8. Safactory worker 通过只读 mount 读取 YAML 和 `dataset.jsonl`，按现有启动约定运行。
+8. Safactory worker 通过只读 mount 读取 YAML 和 `dataset.jsonl`，按 Safactory CLI/entrypoint 约定运行。
 9. Server 持久化 Job 状态、两个 RJob ID、Gateway 地址和文件绑定，重启后可继续轮询和清理。
 10. Session、结果和轨迹查询全部通过 `wt-data-platform-sdk` 访问共享数据表，并始终包含 `job_id` 过滤条件。
 
-### 3.2 非目标
+### 3.2 MVP 范围边界
 
-以下内容不属于 MVP：
-
-- 在 Server 所在机器通过 Docker 或子进程直接运行 Gateway/Safactory；
-- 为 Gateway 调度和 Safactory 调度分别部署两个 Scheduler 服务；
-- 为每个 Job 构建新 image；Job 直接引用预构建的 base image；
-- 在 Gateway 尚未取得可路由地址前并行启动 Safactory；
-- 允许调用方上传或直接指定任意 YAML、JSONL、mount 源路径、image、命令或凭据；
-- 从 worker 本地文件、RJob 日志或进程内存返回 Session、得分和 trajectory；
-- 为每个 Job 创建独立 S3 前缀、独立数据表或临时 S3 凭据；
-- Job 列表、取消、删除、Artifact、日志、事件推送和文件管理公开接口；
-- 暂停后保留内存上下文并恢复，以及 Session/step 级重试或停止。
+- 公开 API 范围为 [API_DESIGN.md](./API_DESIGN.md) 定义的六个接口；
+- Job 停止仅供超时策略和运维内部使用；
+- YAML/JSONL、image、运行命令、mount 和凭据由服务端受信任配置提供；
+- 暂停恢复、Session/step 级重试和手动停止不在 MVP 范围内。
 
 ## 4. 用户角色与核心场景
 
@@ -84,7 +77,7 @@ Safactory 已具备基于 YAML 配置和 dataset 文件执行任务、经 Gatewa
 7. Gateway 就绪后，Server 组合出 Safactory 可访问的 Gateway URL。
 8. Server 使用 Safactory base image 创建 Safactory RJob，传入 `job_id`、`model_id`、Gateway URL、YAML/JSONL mount 和 Safactory 启动参数。
 9. Safactory worker 从 mount 读取配置与数据集，运行任务；模型请求发往该 Job 的 Gateway。
-10. Safactory/Gateway 按现有链路把 Session、step、trajectory 和结果写入 `wt-data-platform-sdk` 管理的共享数据表，记录中包含 `job_id`。
+10. Safactory/Gateway 通过数据写入链路把 Session、step、trajectory 和结果写入 `wt-data-platform-sdk` 管理的共享数据表，记录中包含 `job_id`。
 11. Server 持续轮询两个 RJob 的状态；Safactory 成功退出后，Job 进入 `succeeded`，随后按保留策略清理两个 RJob。
 12. 调用方通过 API 轮询 Session、得分和轨迹；Server 使用 SDK 按 `job_id` 及相关 Session/step 条件查询并归一化返回。
 
@@ -99,8 +92,6 @@ Safactory 已具备基于 YAML 配置和 dataset 文件执行任务、经 Gatewa
 - 清理顺序始终为先 Safactory、后 Gateway，避免 Gateway 先退出导致仍在运行的 Safactory 请求失败或轨迹收尾丢失。
 - RJob 删除失败时进入后台清理队列，不得阻塞 API 查询已持久化的数据。
 
-当前 API 文档没有公开停止接口。MVP 只需支持超时、失败和运维触发的内部停止；若后续公开取消能力，必须先更新 API 契约。
-
 ## 5. 核心领域模型
 
 ### 5.1 Job
@@ -112,8 +103,8 @@ Job 是外部创建和查询的最小任务单元：
 - 绑定一个不可变的 YAML/`dataset.jsonl` 文件版本；
 - 最多拥有一个有效 Gateway RJob 和一个有效 Safactory RJob；
 - 可以产生一个或多个 Session；
-- `job_id` 同时写入 RJob label/env、日志和数据平台记录，用于跨组件关联；
-- `job_id` 不是独立 S3 路径、独立表或底层权限边界。
+- `job_id` 同时写入 RJob label/env、日志和数据平台记录，用于跨组件关联和数据过滤；
+- Job 访问控制由 Server 独立校验。
 
 ### 5.2 Gateway worker
 
@@ -136,7 +127,7 @@ Safactory worker 是从 Safactory base image 创建的一个 RJob：
 - 接收 `job_id`、`model_id`、Gateway URL 和 cloud storage/SDK 运行配置；
 - 以只读方式 mount 当前 Job 的 YAML 与 `dataset.jsonl`；
 - YAML 中的数据集路径必须指向容器内实际 mount 的 `dataset.jsonl`；
-- 按现有 Safactory CLI/entrypoint 约定启动任务；
+- 按 Safactory CLI/entrypoint 约定启动任务；
 - 只连接该 Job 的 Gateway URL；
 - 退出码和 RJob 终态转换为稳定的内部 Job 状态和错误分类。
 
@@ -156,8 +147,7 @@ Safactory worker 是从 Safactory base image 创建的一个 RJob：
 
 - Session 使用 `session_id`，并通过数据平台记录中的 `job_id` 归属于一个 Job；
 - Step 在 Session 内有稳定的 `step_id` 和顺序；
-- Session、Step、得分和轨迹不是 Server 控制数据库中的业务副本；
-- Server 通过 SDK 查询共享表后，按 API 文档归一化返回。
+- Server 通过 SDK 查询共享表并按 API 文档归一化返回。
 
 ## 6. 总体架构
 
@@ -180,13 +170,13 @@ flowchart LR
 
 架构约束：
 
-- 对外只有一个 Job Server；RJob 编排是 Server 的内部模块，不需要单独部署两个 Scheduler。
+- RJob 编排是 Job Server 的内部模块。
 - Server 只提交、轮询和清理 RJob，不承载 Safactory 或 Gateway 的业务进程。
 - 一个 Job 固定创建两个工作负载：一个 Gateway RJob、一个 Safactory RJob。
 - 两个 RJob 引用预构建 base image，不在 Job 创建路径上构建 image。
 - Gateway ready 和地址发现是创建 Safactory RJob 的硬前置条件。
 - YAML/JSONL 必须来自受控文件管理系统，并通过 RJob 可访问的共享存储 mount。
-- Server 查询运行数据时只调用 `wt-data-platform-sdk`，不直接访问底层 S3 对象。
+- Server 通过 `wt-data-platform-sdk` 公共接口查询运行数据。
 
 ## 7. Base image 与 RJob 规范
 
@@ -204,7 +194,7 @@ flowchart LR
 | `rjob_namespace` | 工作负载所在 namespace |
 | `charged_group` | RJob 配额或计费组 |
 
-调用方不能覆盖 image 或资源配置。Server 必须在 Job 记录中保存两个工作负载实际使用的 image 引用。
+Image 和资源配置由服务端管理。Server 必须在 Job 记录中保存两个工作负载实际使用的 image 引用。
 
 ### 7.2 Gateway RJob 提交
 
@@ -287,7 +277,7 @@ range_id
 /mnt/safactory-job/dataset.jsonl
 ```
 
-这里的目录只是启动文件管理布局，不是运行结果的数据前缀。Session、trajectory 和 score 仍写入数据平台共享表。
+该目录用于管理 Safactory 启动输入。Session、trajectory 和 score 写入数据平台共享表。
 
 ### 8.3 发布与 mount 规则
 
@@ -305,8 +295,8 @@ range_id
 
 ### 9.1 数据边界
 
-- 运行数据由 Safactory/Gateway 通过既有链路写入 `wt-data-platform-sdk` 管理的共享 landing/serving 表；
-- `job_id` 是共享表中的任务标识和查询条件，不代表独立 S3 前缀或独立表；
+- 运行数据由 Safactory/Gateway 写入 `wt-data-platform-sdk` 管理的共享 landing/serving 表；
+- `job_id` 是共享表中的任务标识和查询条件；
 - Control DB 只保存 Job/RJob/文件绑定状态，不保存 trajectory 或 score 副本；
 - YAML/JSONL 文件管理系统只保存启动输入，不作为运行结果来源。
 
@@ -321,10 +311,10 @@ range_id
 
 查询要求：
 
-- Server 必须通过 SDK 公共接口查询，不绕过 SDK 直接读取 dldb/S3；
+- Server 必须通过 SDK 公共接口查询；
 - 每次查询必须包含精确 `job_id` 条件；
 - 先校验调用方对 Job 的访问权，再查询共享表；
-- `job_id` 过滤是数据选择条件，不是底层鉴权机制；
+- Server 独立执行 Job 访问控制和 `job_id` 数据过滤；
 - 运行中的 Job 允许暂时返回空 Session 列表、空 step 列表或未完成得分；
 - SDK 超时、权限或解码错误必须映射为 API 文档中的稳定错误；
 - API 返回前必须过滤密钥、内部地址、mount 路径和 SDK 连接信息。
@@ -520,7 +510,7 @@ sequenceDiagram
 
 ### 14.3 安全
 
-- RJob AK/SK、registry 凭据、模型密钥和 SDK/S3 凭据只由 Server/部署环境管理；
+- RJob AK/SK、registry 凭据、模型密钥和数据平台 SDK 凭据只由 Server/部署环境管理；
 - 调用方只能提交 `model_id + range_id`，不能覆盖 image、命令、mount 或凭据；
 - 文件模板和 mount source 必须来自受信任配置；
 - Gateway 地址只用于内部编排，不在公开 API 中返回；
@@ -629,8 +619,8 @@ sequenceDiagram
 | mount 使用 Server 本地路径 | RJob 容器读取不到文件 | mount source 必须位于集群可访问共享存储。 |
 | Server 重启导致重复创建 RJob | 同一 Job 重复运行 | 持久化 RJob ID 并使用幂等名称；恢复时先查询后创建。 |
 | Gateway 先于 Safactory 被删除 | 运行请求和轨迹收尾失败 | 固定清理顺序：先 Safactory、后 Gateway。 |
-| 把启动文件目录当作结果存储 | 数据来源混乱 | YAML/JSONL只用于启动输入；结果统一通过 SDK 查询。 |
-| 把 `job_id` 当作底层权限边界 | 共享表数据可能越权 | API先校验 Job访问权，再使用精确 `job_id` 条件查询 SDK。 |
+| 启动文件与运行结果边界不清 | 数据来源混乱 | YAML/JSONL 只用于启动输入；结果统一通过 SDK 查询。 |
+| `job_id` 过滤缺少访问控制 | 共享表数据可能越权 | API 先校验 Job 访问权，再使用精确 `job_id` 条件查询 SDK。 |
 
 ## 19. 待确认项
 
@@ -638,8 +628,8 @@ sequenceDiagram
 2. RJob 平台返回的是稳定 DNS/Service，还是 worker IP；对应字段和生命周期如何？
 3. Gateway health/readiness endpoint、监听端口和成功判定是什么？
 4. YAML 的准确 schema、Safactory 启动命令以及容器内约定路径是什么？
-5. `dataset.jsonl` 是按 `range_id` 共享只读版本，还是每个 Job都需要物化一份快照？
-6. 统一文件系统使用哪种 RJob 可访问存储，`mount_config` 的 source格式是什么？
+5. `dataset.jsonl` 是按 `range_id` 共享只读版本，还是每个 Job 都需要物化一份快照？
+6. 统一文件系统使用哪种 RJob 可访问存储，`mount_config` 的 source 格式是什么？
 7. RJob 完成后的保留时长、自动删除策略和失败现场保留策略是什么？
 8. Server 重启恢复时，RJob 查询和幂等创建的具体接口能力是什么？
 9. 查询 API 统一读取 landing，还是终态后改读 serving；若改读 serving，可接受的发布延迟是多少？
