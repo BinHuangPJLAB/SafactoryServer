@@ -4,8 +4,8 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v2.3 |
-| 更新日期 | 2026-08-19 |
+| 文档版本 | v2.4 |
+| 更新日期 | 2026-08-20 |
 | Base Path | `/v1` |
 
 ## 1. 设计范围
@@ -26,6 +26,7 @@
 - 一个 Job 只运行一个靶场；
 - 当前靶场为单页面、单拓扑，一个 Job 可对应一个或多个 Session；
 - `range_id` 由基座提供，其值必须与工程中心保存的靶场模板 ID 对齐；
+- 模型信息统一来自服务端模型 YAML，模型查询接口只公开 `model_id` 和 `name`；
 - `model_id` 必须来自模型查询接口，且创建 Job 时仍处于可用状态；
 - ID 均为不透明字符串，调用方不得解析或自行拼接 ID；
 - 创建 Job 后的所有查询都必须携带 `job_id`，服务端必须校验 Session、Step 与 Job 的归属关系；
@@ -115,7 +116,9 @@ sequenceDiagram
 
 ### `GET /v1/models`
 
-创建 Job 前必须先调用此接口。接口只返回当前允许用于新 Job 的模型。
+创建 Job 前必须先调用此接口。服务端从统一的模型 YAML 配置文件读取模型信息，接口只返回当前允许用于新 Job 的模型。
+
+每个模型条目只能返回 `model_id` 和 `name`。YAML 中的模型路由、地址、鉴权引用、可用性配置及其他内部字段不得出现在响应中。
 
 ### Response
 
@@ -128,13 +131,11 @@ HTTP/1.1 200 OK
   "items": [
     {
       "model_id": "model_glm_001",
-      "name": "GLM Route",
-      "description": "General-purpose model route"
+      "name": "GLM Route"
     },
     {
       "model_id": "model_qwen_001",
-      "name": "Qwen Route",
-      "description": "Qwen model route"
+      "name": "Qwen Route"
     }
   ]
 }
@@ -147,9 +148,13 @@ HTTP/1.1 200 OK
 | `items` | array | 是 | 当前可用于创建 Job 的模型列表 |
 | `items[].model_id` | string | 是 | 创建 Job 时使用的模型 ID |
 | `items[].name` | string | 是 | 模型展示名称 |
-| `items[].description` | string | 否 | 模型说明 |
 
-模型列表可能发生变化。创建 Job 时，服务端必须再次校验 `model_id` 是否可用。
+约束：
+
+- 模型 YAML 中的 `model_id` 必须唯一，`model_id` 和 `name` 均不能为空；
+- 接口只返回 YAML 中配置为可用于新 Job 的模型；
+- 模型 YAML 不存在、无法读取或校验失败时，返回 `503 DEPENDENCY_UNAVAILABLE`；
+- 模型列表可能发生变化。创建 Job 时，服务端必须从同一模型配置源再次校验 `model_id` 是否可用。
 
 ## 5. 创建 Job
 
@@ -207,7 +212,7 @@ Location: /v1/jobs/sessions?job_id=job_01K2XYZ...
 | `RANGE_NOT_FOUND` | 422 | `range_id` 无法匹配工程中心靶场模板 |
 | `RANGE_NOT_AVAILABLE` | 422 | 靶场模板当前不可用 |
 | `MODEL_RANGE_NOT_SUPPORTED` | 422 | 所选模型不支持该靶场 |
-| `DEPENDENCY_UNAVAILABLE` | 503 | 工程中心或执行依赖暂不可用 |
+| `DEPENDENCY_UNAVAILABLE` | 503 | 模型配置、工程中心或执行依赖暂不可用 |
 
 ## 6. 使用 Job ID 查询 Session ID 列表
 
@@ -480,7 +485,7 @@ HTTP/1.1 200 OK
 | `JOB_NOT_FOUND` | 404 | 否 | Job 不存在 |
 | `SESSION_NOT_FOUND` | 404 | 否 | Session 不存在或不属于指定 Job |
 | `STEP_NOT_FOUND` | 404 | 否 | Step 不存在或不属于指定 Session |
-| `DEPENDENCY_UNAVAILABLE` | 503 | 是 | 工程中心、执行引擎或存储暂不可用 |
+| `DEPENDENCY_UNAVAILABLE` | 503 | 是 | 模型配置、工程中心、执行引擎或存储暂不可用 |
 | `INTERNAL_ERROR` | 500 | 是 | 未分类的服务端错误 |
 
 ## 11. 闭环验收标准
