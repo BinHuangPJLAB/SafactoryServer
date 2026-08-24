@@ -49,11 +49,11 @@ storage:
     rjob_source: ${SAFACTORY_RESULTS_RJOB_SOURCE}
     mount_path: /app/results
 
-# Server 自己维护的环境目录；ranges.yaml 中的相对路径从 environment_root 解析。
+# Server 自己维护的 env/ 目录；ranges.yaml 中的相对路径从 environment_root 解析。
 catalog:
   models_path: ./models.yaml
   ranges_path: ./ranges.yaml
-  environment_root: ../../environments
+  environment_root: ../../env
 
 gateway:
   config_local_dir: ./gateway

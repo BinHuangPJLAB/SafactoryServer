@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-COPY environments ./environments
+COPY env ./env
 COPY examples/real ./config/real
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url "${PIP_INDEX_URL}" .

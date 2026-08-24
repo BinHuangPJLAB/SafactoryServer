@@ -30,7 +30,7 @@ Phase 1 的 Job 保存在进程内存中，因此服务必须以单 worker 运�
 
 DB、RJob 连接、env/results 共享盘映射、Gateway 配置及 launcher 参数都集中在
 [`examples/real/initialization.yaml`](examples/real/initialization.yaml)。Server 自己维护的环境
-目录位于 [`environments/`](environments/README.md)，其结构与 Safactory 的 `env/` 相同。
+目录位于 [`env/`](env/README.md)，直接沿用 Safactory 的 `env/` 结构。
 完整字段和部署检查见 [Phase 2 部署说明](docs/PHASE2_DEPLOYMENT.md)。
 
 ```bash

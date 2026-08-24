@@ -1,0 +1,33 @@
+agent_name: openrt
+
+container:
+  workdir: /app
+  runner_entrypoint:
+    source: ./runner.py
+    target: /tmp/safactory-openrt-runner.py
+    command: "python /tmp/safactory-openrt-runner.py"
+
+  mounts:
+    - source: /Users/bin-mac/AILab/OpenRT/data
+      target: /app/data
+      mode: ro
+
+    - source: /Users/bin-mac/CodeX/Safactory/results
+      target: /app/results
+      mode: rw
+
+  env:
+    OPENAI_API_KEY: EMPTY
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    ALL_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    all_proxy: ""
+    NO_PROXY: host.docker.internal,localhost,127.0.0.1,::1
+    no_proxy: host.docker.internal,localhost,127.0.0.1,::1
+
+  extra_args:
+    - --add-host=host.docker.internal:host-gateway
+
+  idle_command: "tail -f /dev/null"

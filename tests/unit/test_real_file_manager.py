@@ -83,10 +83,10 @@ def test_bundled_managed_environment_can_be_bound(
         results_rjob_root="gpfs://shared/results",
     )
 
-    binding = manager.bind("job_smoke", "range_web_001")
+    binding = manager.bind("job_smoke", "range_harbor_smoke_001")
 
-    runner = Path(binding.input_local_path, "groups/browser/runner.py")
+    runner = Path(binding.input_local_path, "groups/harbor/runner.py")
     assert runner.is_file()
     assert binding.agent_start_config_path == (
-        "/mnt/safactory-job/groups/browser/start.rjob.yaml"
+        "/mnt/safactory-job/groups/harbor/start.rjob.yaml"
     )

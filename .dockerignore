@@ -5,6 +5,9 @@
 .ruff_cache
 __pycache__
 *.py[cod]
+env/**/__pycache__
+env/**/runtime
+env/**/results
 *.egg-info
 build
 dist

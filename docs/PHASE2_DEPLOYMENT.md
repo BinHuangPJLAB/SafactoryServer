@@ -64,7 +64,8 @@ Server 在 `environment.local_path/<job_id>` 原子发布不可变快照；RJob 
 
 ## Server 自管环境目录
 
-[`environments/`](../environments/README.md) 是环境信息源，等价于 Safactory 仓库的 `env/`。
+[`env/`](../env/README.md) 是 Server 维护的环境信息源，直接沿用 Safactory 仓库的
+`env/` 结构。
 每个环境需要包含 agent YAML、dataset JSONL、start RJob YAML，以及 start config 引用但未
 内置于环境镜像的 runner/evaluator 文件。`ranges.yaml` 将一个 range 映射到这些文件。
 

@@ -1,0 +1,33 @@
+environments:
+  - env_name: cybergym
+    env_image: registry.h.pjlab.org.cn/ailab-evobox-evobox_cpu/benches:cybergym_004
+    env_num: 1
+    dataset:  ./dataset/cybergym_tasks_full.jsonl
+    dataset_load_mode: eager
+
+    env_params:
+      task_family: cybergym
+      cybergym_root: /workspace/cybergym
+      data_dir: /workspace/cybergym/cybergym_data/data
+      image_archive_dir: /workspace/cybergym/images
+      results_root: /workspace/cybergym/results
+
+      route_model: kimi-k3
+      model_ref: local/kimi-k3
+
+      image_load_timeout_s: 1800
+
+      agent_type: opencode
+      agent_runner: /workspace/cybergym/examples/agents/opencode/run.py
+      agent_image: opencode:001
+      agent_image_archive: opencode.tar
+      agent_options:
+        remove_tmp: true
+
+      max_iter: 100
+      max_output_tokens: 20480
+      native_tool_calling: false
+      silent: false
+
+      timeout_s: 7200
+      verify_timeout_s: 1200

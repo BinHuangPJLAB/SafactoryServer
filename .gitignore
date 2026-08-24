@@ -7,4 +7,9 @@ dist/
 build/
 *.egg-info/
 .env
-
+env/**/__pycache__/
+env/**/runtime/*
+!env/**/runtime/.gitkeep
+env/**/results/*
+!env/**/results/.gitkeep
+!env/**/results/.gitignore

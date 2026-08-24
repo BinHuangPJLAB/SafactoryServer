@@ -1,11 +1,11 @@
 schema_version: "1.0"
 ranges:
-  - range_id: range_web_001
+  - range_id: range_harbor_smoke_001
     available: true
     availability_retryable: false
     supported_models: [model_glm_001]
-    agent_config: browser/agent.yaml
+    agent_config: harbor/harbor_cvebench_config.rjob.yaml
     groups:
-      - env_name: browser
-        dataset: browser/datasets/smoke.jsonl
-        start_config: browser/start.rjob.yaml
+      - env_name: harbor
+        dataset: harbor/datasets/harbor_cvebench_smoke.jsonl
+        start_config: harbor/harbor_cvebench_start.rjob.yaml

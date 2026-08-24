@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!Dockerfile.agents
+!runner.sh
+!runner_lib/
+!runner_lib/**
+runner_lib/__pycache__/
+runner_lib/**/*.pyc

@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1.7
+
+ARG BASE_IMAGE=registry.h.pjlab.org.cn/ailab-evobox-evobox_cpu/benches:cybergym_001
+FROM ${BASE_IMAGE}
+
+USER root
+
+# agent_source is a named build context pointing at the local CyberGym checkout.
+# Preserve the already-built OpenHands repository from the base image and add the
+# missing controllers. Only the lightweight OpenHands adapter/template is updated.
+COPY --from=agent_source examples/agents/README.md /workspace/cybergym/examples/agents/README.md
+COPY --from=agent_source examples/agents/codex/ /workspace/cybergym/examples/agents/codex/
+# Cybench's 1.5 GB benchmark corpus is already part of its nested runtime image;
+# the host controller only bind-mounts run_task.py and agent/ into that image.
+COPY --from=agent_source examples/agents/cybench/run.py /workspace/cybergym/examples/agents/cybench/run.py
+COPY --from=agent_source examples/agents/cybench/cybench-repo/run_task.py /workspace/cybergym/examples/agents/cybench/cybench-repo/run_task.py
+COPY --from=agent_source examples/agents/cybench/cybench-repo/agent/ /workspace/cybergym/examples/agents/cybench/cybench-repo/agent/
+COPY --from=agent_source examples/agents/enigma/ /workspace/cybergym/examples/agents/enigma/
+COPY --from=agent_source examples/agents/opencode/ /workspace/cybergym/examples/agents/opencode/
+COPY --from=agent_source examples/agents/openhands/run.py /workspace/cybergym/examples/agents/openhands/run.py
+COPY --from=agent_source examples/agents/openhands/template/ /workspace/cybergym/examples/agents/openhands/template/
+
+# Enigma is the only host-side controller that needs its own Python environment.
+RUN python3.12 -m venv /workspace/cybergym/examples/agents/enigma/enigma-repo/venv \
+    && /workspace/cybergym/examples/agents/enigma/enigma-repo/venv/bin/pip install \
+      --no-cache-dir \
+      -r /workspace/cybergym/examples/agents/enigma/enigma-repo/requirements.txt \
+    && git config --system user.name cybergym \
+    && git config --system user.email cybergym@localhost
+
+RUN mkdir -p /opt/safactory/cybergym
+COPY runner.sh /opt/safactory/cybergym/runner.sh
+COPY runner_lib/ /opt/safactory/cybergym/
+
+RUN chmod 0755 \
+      /opt/safactory/cybergym/runner.sh \
+      /opt/safactory/cybergym/common.sh \
+      /opt/safactory/cybergym/docker_prepare.sh \
+      /opt/safactory/cybergym/rjob_prepare.sh \
+      /opt/safactory/cybergym/agent_dispatch.py \
+      /opt/safactory/cybergym/episode_prepare.py \
+      /opt/safactory/cybergym/openhands_prepare.py \
+      /opt/safactory/cybergym/result_writer.py \
+    && bash -n /opt/safactory/cybergym/runner.sh \
+    && bash -n /opt/safactory/cybergym/common.sh \
+    && bash -n /opt/safactory/cybergym/docker_prepare.sh \
+    && bash -n /opt/safactory/cybergym/rjob_prepare.sh \
+    && python3.12 -m py_compile \
+      /opt/safactory/cybergym/agent_dispatch.py \
+      /opt/safactory/cybergym/episode_prepare.py \
+      /opt/safactory/cybergym/openhands_prepare.py \
+      /opt/safactory/cybergym/result_writer.py \
+    && test -f /workspace/cybergym/examples/agents/codex/run.py \
+    && test -f /workspace/cybergym/examples/agents/cybench/run.py \
+    && test -x /workspace/cybergym/examples/agents/enigma/enigma-repo/venv/bin/python \
+    && test -f /workspace/cybergym/examples/agents/opencode/run.py \
+    && test -f /workspace/cybergym/examples/agents/openhands/run.py
+
+WORKDIR /workspace/cybergym
+ENTRYPOINT []
+CMD []
