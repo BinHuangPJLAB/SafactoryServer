@@ -1,0 +1,5 @@
+schema_version: "1.0"
+users:
+  # Replace this local-development credential or mount another file in deployment.
+  - username: safactory-local
+    api_key: safactory-local-development-key

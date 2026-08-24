@@ -1,0 +1,5 @@
+schema_version: "1.0"
+gateway_base_image: mock.local/safactory-gateway:phase2-placeholder
+safactory_base_image: mock.local/safactory-controller:phase2-placeholder
+image_pull_policy: IfNotPresent
+placeholder: true

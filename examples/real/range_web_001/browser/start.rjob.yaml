@@ -1,0 +1,9 @@
+agent_name: browser
+container:
+  runner_entrypoint:
+    source: /opt/safactory/runner.py
+    target: /app/runner.py
+    command: python /app/runner.py
+rjob:
+  mount_config:
+    - shared-results-placeholder:/app/results

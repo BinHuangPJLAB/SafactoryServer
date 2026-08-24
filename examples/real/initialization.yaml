@@ -1,0 +1,97 @@
+schema_version: "1.0"
+
+# Gateway 和 Safactory launcher 使用同一个已经验证过的镜像。
+gateway_base_image: registry.h.pjlab.org.cn/ailab-evobox-evobox_proxy/server:safactory003
+safactory_base_image: registry.h.pjlab.org.cn/ailab-evobox-evobox_proxy/server:safactory003
+image_pull_policy: Always
+placeholder: false
+
+# Server 自己的 Control DB，以及 Gateway / launcher 使用的 Cloud DB 环境。
+# 密钥只引用进程环境变量，不要把真实值提交进 Git。
+database:
+  control_db_path: ./runtime/control.db
+  data_platform_factory: wt_data_platform_sdk:create_client
+  environment:
+    WT_SDK_PROFILE: production
+    WT_SDK_DB_URI: ${WT_SDK_DB_URI}
+    WT_SDK_ENV_CONFIG_DB_URI: ${WT_SDK_ENV_CONFIG_DB_URI}
+    WT_SDK_S3_ENDPOINT: ${WT_SDK_S3_ENDPOINT}
+    WT_SDK_S3_ALLOW_HTTP: "true"
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    AWS_EC2_METADATA_DISABLED: "true"
+
+# 直接调用 brainpp.rjob；字段与 Safactory/config.yaml 及两个创建脚本一致。
+rjob:
+  backend: brainpp
+  cluster_entry: https://h.pjlab.org.cn
+  namespace: ailab-evobox
+  charged_group: evobox_proxy
+  access_key: ${RJOB_ACCESS_KEY}
+  secret_key: ${RJOB_SECRET_KEY}
+  verifyssl: true
+  retries: 3
+  no_packaging: true
+  private_machine: Group
+  host_network: false
+  auto_delete_duration: 12h
+  max_running_duration: 14h
+
+# local_path 必须是 Job Server 可写的共享盘路径；rjob_source 是同一目录在
+# RJob 平台中的 source 写法。每个 Job 都会生成独立 env 快照和 results 子目录。
+storage:
+  environment:
+    local_path: ./runtime/env
+    rjob_source: ${SAFACTORY_ENV_RJOB_SOURCE}
+    mount_path: /app/env
+  results:
+    local_path: ./runtime/results
+    rjob_source: ${SAFACTORY_RESULTS_RJOB_SOURCE}
+    mount_path: /app/results
+
+# Server 自己维护的环境目录；ranges.yaml 中的相对路径从 environment_root 解析。
+catalog:
+  models_path: ./models.yaml
+  ranges_path: ./ranges.yaml
+  environment_root: ../../environments
+
+gateway:
+  config_local_dir: ./gateway
+  config_source_dir: ${SAFACTORY_GATEWAY_CONFIG_SOURCE_DIR}
+  config_mount_dir: /app/runtime-config
+  config_filename: gateway.yaml
+  workdir: /app
+  port: 8000
+  scheme: http
+  health_path: /readyz
+  sessions_path: /v1/sessions
+  ready_timeout_seconds: 900
+  health_timeout_seconds: 3
+  resources:
+    cpu: 1
+    gpu: 0
+    memory_in_mb: 4096
+
+safactory:
+  workdir: /app
+  python_bin: python
+  launcher_rjob_config: config.yaml
+  storage_type: cloud
+  pool_size: 10
+  multiplier: 1.0
+  max_workers: 10
+  max_steps: 150
+  agent_start_timeout_seconds: 9000
+  enable_evaluation: true
+  timeout_seconds: 50400
+  resources:
+    cpu: 4
+    gpu: 0
+    memory_in_mb: 16384
+  episode_rjob_defaults:
+    poll_interval_s: 5
+    cleanup_on_finish: true
+    keep_failed_jobs: false
+  launcher_args: []
+
+runtime_no_proxy: localhost,127.0.0.1,::1,10.0.0.0/8,100.96.0.0/12,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,.pjlab.local,.pjlab.org.cn,.pjh-service.org.cn,kubernetes.default.svc

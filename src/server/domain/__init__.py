@@ -1,0 +1,2 @@
+"""Domain objects and errors."""
+

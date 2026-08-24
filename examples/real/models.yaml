@@ -1,0 +1,12 @@
+schema_version: "1.0"
+models:
+  - model_id: model_glm_001
+    name: GLM Route
+    available: true
+    gateway:
+      llm_model: kimi-k3
+      route:
+        provider: glm
+        credential_ref: secret/models/glm
+      environment:
+        MODEL_ROUTE_NAME: glm-production

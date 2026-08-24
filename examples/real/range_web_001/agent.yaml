@@ -1,0 +1,8 @@
+environments:
+  - env_name: browser
+    env_image: registry.example/safactory-browser@sha256:replace-me
+    env_num: 1
+    dataset: placeholder/dataset.jsonl
+    env_params:
+      locale: zh-CN
+      safactory_results_root: /app/results

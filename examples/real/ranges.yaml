@@ -1,0 +1,11 @@
+schema_version: "1.0"
+ranges:
+  - range_id: range_web_001
+    available: true
+    availability_retryable: false
+    supported_models: [model_glm_001]
+    agent_config: browser/agent.yaml
+    groups:
+      - env_name: browser
+        dataset: browser/datasets/smoke.jsonl
+        start_config: browser/start.rjob.yaml

@@ -257,7 +257,7 @@ flowchart LR
 | `rjob_namespace` | 工作负载所在 namespace |
 | `charged_group` | RJob 配额或计费组 |
 
-Image 和资源配置由服务端管理。Server 必须在 Job 记录中保存两个顶层工作负载实际使用的 image 引用；episode image 版本由 Safactory controller 的运行摘要关联记录。
+Gateway 与 Safactory 的 image 必须集中写入同一份服务端初始化 YAML，不接受调用方字段或独立环境变量覆盖。真实 image 尚未提供时可在该 YAML 中使用明确标记的 Mock placeholder，但不得据此伪造 RJob 或 Job 成功。Image 和资源配置由服务端管理。Server 必须在 Job 记录中保存两个顶层工作负载实际使用的 image 引用；episode image 版本由 Safactory controller 的运行摘要关联记录。
 
 ### 8.2 Gateway RJob 提交
 

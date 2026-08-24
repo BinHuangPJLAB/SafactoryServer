@@ -1,0 +1,2 @@
+"""Safactory Job Server."""
+
