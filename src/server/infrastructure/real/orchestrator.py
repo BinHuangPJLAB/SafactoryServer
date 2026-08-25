@@ -521,6 +521,23 @@ class RealJobOrchestrator:
         await self._cleanup(job)
 
     async def _cleanup(self, job: ControlJob) -> None:
+        if self._settings.keep_rjobs:
+            await self._store.update(
+                job.job_id,
+                now=self._clock.now(),
+                cleanup_requested=0,
+            )
+            await self._event(
+                job,
+                "rjob_cleanup_skipped",
+                {
+                    "reason": "SAFACTORY_KEEP_RJOBS",
+                    "gateway_rjob_id": job.gateway_rjob_id,
+                    "safactory_rjob_id": job.safactory_rjob_id,
+                },
+            )
+            return
+
         # The controller owns episode RJobs; stopping it first triggers its idempotent
         # nested cleanup. The Gateway remains available until that request completes.
         try:

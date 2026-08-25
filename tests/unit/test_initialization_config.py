@@ -10,6 +10,12 @@ from server.infrastructure.real.configuration import (
 )
 
 
+def test_keep_rjobs_startup_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SAFACTORY_KEEP_RJOBS", "true")
+
+    assert Settings.from_env().keep_rjobs is True
+
+
 def test_bundled_initialization_is_a_complete_real_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -124,7 +130,7 @@ safactory: {}
     )
 
     config = load_initialization_config(config_path)
-    settings = apply_initialization_config(Settings(), config)
+    settings = apply_initialization_config(Settings(keep_rjobs=True), config)
 
     assert settings.rjob_backend == "brainpp"
     assert settings.rjob_cluster_entry == "https://rjob.example"
@@ -132,6 +138,7 @@ safactory: {}
     assert settings.control_db_path == tmp_path / "runtime/control.db"
     assert settings.shared_storage_rjob_source == "gpfs://shared/env"
     assert settings.results_rjob_source == "gpfs://shared/results"
+    assert settings.keep_rjobs is True
     assert '"listen_port":8000' in settings.gateway_config_json
     assert "secret-access-key-value" not in repr(config)
     assert "secret-signing-key-value" not in repr(config)

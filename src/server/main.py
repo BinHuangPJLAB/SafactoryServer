@@ -81,6 +81,11 @@ def create_app(
         settings.log_file_level,
         log_file,
     )
+    LOGGER.info(
+        "rjob_cleanup_policy=%s keep_rjobs=%s",
+        "preserve" if settings.keep_rjobs else "delete",
+        settings.keep_rjobs,
+    )
 
     auth_config = load_auth_config(settings.auth_config_path)
     authenticator = BearerAuthenticator.from_config(auth_config)

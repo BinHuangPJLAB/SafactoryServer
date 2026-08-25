@@ -43,11 +43,21 @@ def test_orders_recovers_and_cleans_top_level_rjobs(tmp_path: Path, caplog) -> N
     assert "--llm-model kimi-k3" in launch_messages[0]
 
 
+def test_keep_rjobs_skips_top_level_cleanup(tmp_path: Path) -> None:
+    asyncio.run(_exercise_orchestrator(tmp_path, keep_rjobs=True))
+
+
 def test_gateway_failure_never_submits_controller(tmp_path: Path) -> None:
     asyncio.run(_exercise_gateway_failure(tmp_path))
 
 
-async def _exercise_orchestrator(tmp_path: Path) -> None:
+def test_keep_rjobs_skips_cleanup_after_failure(tmp_path: Path) -> None:
+    asyncio.run(_exercise_gateway_failure(tmp_path, keep_rjobs=True))
+
+
+async def _exercise_orchestrator(
+    tmp_path: Path, *, keep_rjobs: bool = False
+) -> None:
     ranges = write_real_configs(tmp_path)
     initialization = load_initialization_config(write_initialization_config(tmp_path))
     settings = Settings(
@@ -57,6 +67,7 @@ async def _exercise_orchestrator(tmp_path: Path) -> None:
         control_db_path=tmp_path / "control.db",
         shared_storage_root=tmp_path / "shared",
         rjob_endpoint="https://rjob.invalid",
+        keep_rjobs=keep_rjobs,
     )
     clock = FakeClock(current=datetime(2026, 8, 22, tzinfo=UTC))
     catalog = RealCatalog(ranges, REAL_GATEWAY_ROUTES)
@@ -166,12 +177,27 @@ async def _exercise_orchestrator(tmp_path: Path) -> None:
     assert completed is not None
     assert completed.status == "succeeded"
     assert completed.cleanup_requested == 0
-    assert rjobs.stopped == ["rjob_controller", "rjob_gateway"]
+    assert rjobs.stopped == (
+        [] if keep_rjobs else ["rjob_controller", "rjob_gateway"]
+    )
     events = await store.events(job.job_id)
-    assert "job_succeeded" in {item["event_type"] for item in events}
+    event_types = {item["event_type"] for item in events}
+    assert "job_succeeded" in event_types
+    if keep_rjobs:
+        assert "rjob_cleanup_skipped" in event_types
+        skipped = next(
+            item for item in events if item["event_type"] == "rjob_cleanup_skipped"
+        )
+        assert skipped["payload"] == {
+            "reason": "SAFACTORY_KEEP_RJOBS",
+            "gateway_rjob_id": "rjob_gateway",
+            "safactory_rjob_id": "rjob_controller",
+        }
 
 
-async def _exercise_gateway_failure(tmp_path: Path) -> None:
+async def _exercise_gateway_failure(
+    tmp_path: Path, *, keep_rjobs: bool = False
+) -> None:
     ranges = write_real_configs(tmp_path)
     initialization = load_initialization_config(write_initialization_config(tmp_path))
     settings = Settings(
@@ -181,6 +207,7 @@ async def _exercise_gateway_failure(tmp_path: Path) -> None:
         control_db_path=tmp_path / "control.db",
         shared_storage_root=tmp_path / "shared",
         rjob_endpoint="https://rjob.invalid",
+        keep_rjobs=keep_rjobs,
     )
     clock = FakeClock(current=datetime(2026, 8, 22, tzinfo=UTC))
     catalog = RealCatalog(ranges, REAL_GATEWAY_ROUTES)
@@ -232,4 +259,10 @@ async def _exercise_gateway_failure(tmp_path: Path) -> None:
     assert failed.status == "failed"
     assert failed.status_reason == "GATEWAY_RJOB_FAILED"
     assert failed.safactory_rjob_id is None
-    assert rjobs.stopped == ["rjob_gateway"]
+    assert rjobs.stopped == ([] if keep_rjobs else ["rjob_gateway"])
+    if keep_rjobs:
+        assert failed.cleanup_requested == 0
+        events = await store.events(failed.job_id)
+        assert "rjob_cleanup_skipped" in {
+            item["event_type"] for item in events
+        }

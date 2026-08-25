@@ -44,6 +44,12 @@ safactory-job-server
 任一真实依赖不可用都会拒绝启动。Job 状态、Gateway IP 和两个顶层 RJob ID 保存在 SQLite
 Control DB 中，服务重启后编排器会继续对账。
 
+调试时可在启动 Server 前设置 `SAFACTORY_KEEP_RJOBS=true`。此时 Job 进入终态后，Server
+不会主动 stop/delete 顶层 Safactory controller 和 Gateway RJob，并会将 Control DB 的
+待清理标记正常收口，避免后台重复尝试。默认值为 `false`。episode 子 RJob 仍由对应 start
+config 的 `cleanup_on_finish` 和 `keep_failed_jobs` 控制；保留的顶层 RJob 也仍受平台
+`rjob.auto_delete_duration` 策略约束。
+
 ## 日志
 
 stdout 只输出请求、启动、RJob 状态变化、Job 终态、清理结果和 warning/error；周期性对账、

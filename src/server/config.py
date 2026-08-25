@@ -56,6 +56,7 @@ class Settings:
     charged_group: str = "default"
     rjob_private_machine: str = "Group"
     rjob_host_network: bool | None = None
+    keep_rjobs: bool = False
     rjob_auto_delete_duration: str = "12h"
     rjob_max_running_duration: str = "14h"
     rjob_credential_ref: str = ""
@@ -220,6 +221,7 @@ class Settings:
             charged_group=os.getenv("SAFACTORY_CHARGED_GROUP", "default"),
             rjob_private_machine=os.getenv("SAFACTORY_RJOB_PRIVATE_MACHINE", "Group"),
             rjob_host_network=_optional_boolean_env("SAFACTORY_RJOB_HOST_NETWORK"),
+            keep_rjobs=_boolean_env("SAFACTORY_KEEP_RJOBS", False),
             rjob_auto_delete_duration=os.getenv(
                 "SAFACTORY_RJOB_AUTO_DELETE_DURATION", "12h"
             ),
