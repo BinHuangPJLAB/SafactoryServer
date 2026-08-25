@@ -758,13 +758,17 @@ def _launcher_command(
     gateway_url: str,
     llm_model: str,
 ) -> tuple[str, ...]:
+    launcher_rjob_config = (
+        binding.launcher_rjob_config_path
+        or settings.safactory_launcher_rjob_config
+    )
     command = [
         settings.safactory_python_bin,
         "launcher.py",
         "--mode",
         "rjob",
         "--rjob-config",
-        settings.safactory_launcher_rjob_config,
+        launcher_rjob_config,
         "--agent-config",
         binding.agent_config_path,
         "--agent-start-config",

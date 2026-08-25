@@ -95,6 +95,9 @@ def test_bundled_managed_environment_can_be_bound(
 
     binding = manager.bind("job_smoke", "range_cyberrange_smoke_001")
     full_binding = manager.bind("job_full", "range_cyberrange_full_001")
+    harbor_binding = manager.bind(
+        "job_harbor", "range_harbor_vulhub_claude_kimi_all_001"
+    )
 
     runner = Path(binding.input_local_path, "groups/cyberrange/runner.py")
     assert runner.is_file()
@@ -103,6 +106,29 @@ def test_bundled_managed_environment_can_be_bound(
     )
     assert binding.total_episodes == 1
     assert full_binding.total_episodes == 4
+    assert harbor_binding.total_episodes == 474
+    assert harbor_binding.launcher_rjob_config_path == (
+        f"{harbor_binding.input_target}/launcher.rjob.yaml"
+    )
+    assert harbor_binding.launcher_rjob_config_checksum
+    harbor_launcher = yaml.safe_load(
+        Path(harbor_binding.input_local_path, "launcher.rjob.yaml").read_text()
+    )
+    assert harbor_launcher["rjob"]["name_prefix"] == "harbor-vulhub"
+    assert harbor_launcher["rjob"]["submit_concurrency"] == 40
+    harbor_start = yaml.safe_load(
+        Path(
+            harbor_binding.input_local_path,
+            "groups/harbor/start.rjob.yaml",
+        ).read_text()
+    )
+    assert harbor_start["rjob"]["privileged"] is True
+    assert harbor_start["rjob"]["resources"]["custom_resources"] == [
+        "brainpp.cn/fuse=1"
+    ]
+    assert harbor_start["rjob"]["mount_config"][-1] == (
+        f"{harbor_binding.result_source}:/app/results"
+    )
     rendered_start = yaml.safe_load(
         Path(
             binding.input_local_path,

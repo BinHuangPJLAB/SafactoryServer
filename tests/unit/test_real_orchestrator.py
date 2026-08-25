@@ -21,8 +21,12 @@ from server.infrastructure.real.configuration import (
     load_initialization_config,
 )
 from server.infrastructure.real.control_store import SQLiteControlStore, new_control_job
-from server.infrastructure.real.file_manager import SharedFileManager
-from server.infrastructure.real.orchestrator import RealJobOrchestrator
+from server.infrastructure.real.file_manager import (
+    EnvironmentBinding,
+    JobFileBinding,
+    SharedFileManager,
+)
+from server.infrastructure.real.orchestrator import RealJobOrchestrator, _launcher_command
 from server.infrastructure.real.rjob import RJobSnapshot, RJobState
 
 
@@ -53,6 +57,46 @@ def test_gateway_failure_never_submits_controller(tmp_path: Path) -> None:
 
 def test_keep_rjobs_skips_cleanup_after_failure(tmp_path: Path) -> None:
     asyncio.run(_exercise_gateway_failure(tmp_path, keep_rjobs=True))
+
+
+def test_launcher_uses_range_specific_rjob_config() -> None:
+    binding = JobFileBinding(
+        job_id="job_harbor",
+        range_id="range_harbor",
+        input_local_path="/shared/job_harbor",
+        input_source="gpfs://shared/job_harbor",
+        input_target="/app/env",
+        result_local_path="/results/job_harbor",
+        result_source="gpfs://results/job_harbor",
+        result_target="/app/results",
+        agent_config_path="/app/env/config.yaml",
+        agent_start_config_path="/app/env/groups/harbor/start.rjob.yaml",
+        agent_config_checksum="agent-checksum",
+        groups=(
+            EnvironmentBinding(
+                env_name="harbor",
+                env_image="registry/harbor:latest",
+                env_num=1,
+                dataset_records=1,
+                dataset_checksum="dataset-checksum",
+                start_config_checksum="start-checksum",
+            ),
+        ),
+        total_episodes=1,
+        launcher_rjob_config_path="/app/env/launcher.rjob.yaml",
+        launcher_rjob_config_checksum="launcher-checksum",
+    )
+
+    command = _launcher_command(
+        settings=Settings(safactory_launcher_rjob_config="global.rjob.yaml"),
+        binding=binding,
+        job_id=binding.job_id,
+        gateway_url="http://gateway.example/v1/sessions",
+        llm_model="kimi-k3",
+    )
+
+    config_index = command.index("--rjob-config")
+    assert command[config_index + 1] == "/app/env/launcher.rjob.yaml"
 
 
 async def _exercise_orchestrator(
@@ -141,6 +185,8 @@ async def _exercise_orchestrator(
         "--mode",
         "rjob",
     )
+    rjob_config_index = rjobs.created[1].command.index("--rjob-config")
+    assert rjobs.created[1].command[rjob_config_index + 1] == "config.yaml"
     assert "--agent-start-config" in rjobs.created[1].command
     llm_model_index = rjobs.created[1].command.index("--llm-model")
     assert rjobs.created[1].command[llm_model_index + 1] == "kimi-k3"

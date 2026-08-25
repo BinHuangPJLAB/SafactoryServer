@@ -204,6 +204,7 @@ class RangeConfig(ConfigModel):
     available: bool = True
     availability_retryable: bool = False
     agent_config: Path
+    launcher_rjob_config: Path | None = None
     groups: tuple[RangeGroupConfig, ...] = Field(min_length=1)
 
     @model_validator(mode="after")

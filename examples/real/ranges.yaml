@@ -17,3 +17,13 @@ ranges:
       - env_name: cyberrange
         dataset: cyberrange/datasets/cyberrange_cases.jsonl
         start_config: cyberrange/cyberrange_start.rjob.yaml
+
+  - range_id: range_harbor_vulhub_claude_kimi_all_001
+    available: true
+    availability_retryable: false
+    agent_config: harbor/harbor_vulhub_claude_kimi_all_config.rjob.yaml
+    launcher_rjob_config: harbor/harbor_vulhub_rjob_config.yaml
+    groups:
+      - env_name: harbor
+        dataset: harbor/datasets/harbor_vulhub_all.jsonl
+        start_config: harbor/harbor_vulhub_start.rjob.yaml

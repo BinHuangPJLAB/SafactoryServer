@@ -48,6 +48,8 @@ class JobFileBinding:
     agent_config_checksum: str
     groups: tuple[EnvironmentBinding, ...]
     total_episodes: int
+    launcher_rjob_config_path: str | None = None
+    launcher_rjob_config_checksum: str = ""
     gateway_config_source: str = ""
     gateway_config_path: str = "/app/runtime-config/gateway.yaml"
     gateway_config_checksum: str = ""
@@ -61,6 +63,8 @@ class JobFileBinding:
         raw["groups"] = tuple(EnvironmentBinding(**item) for item in raw["groups"])
         raw.setdefault("input_local_path", raw["input_source"])
         raw.setdefault("result_local_path", raw["result_source"])
+        raw.setdefault("launcher_rjob_config_path", None)
+        raw.setdefault("launcher_rjob_config_checksum", "")
         raw.setdefault(
             "gateway_config_source", _join_source(raw["input_source"], "gateway")
         )
@@ -186,6 +190,22 @@ class SharedFileManager:
                 "configure exactly one environment group"
             )
 
+        launcher_rjob_config_path: str | None = None
+        launcher_rjob_config_checksum = ""
+        if range_config.launcher_rjob_config is not None:
+            launcher_source = self._catalog.resolve_source(
+                range_config.launcher_rjob_config
+            )
+            launcher_document = _read_yaml(launcher_source)
+            _validate_launcher_rjob_config(launcher_document)
+            launcher_content = _dump_yaml(launcher_document)
+            launcher_filename = "launcher.rjob.yaml"
+            (staging / launcher_filename).write_bytes(launcher_content)
+            launcher_rjob_config_path = (
+                f"{self._input_target}/{launcher_filename}"
+            )
+            launcher_rjob_config_checksum = _sha256(launcher_content)
+
         result_local_path = self._results_root / job_id
         result_local_path.mkdir(parents=True, exist_ok=True)
         result_source = _join_source(self._results_rjob_root, job_id)
@@ -275,6 +295,8 @@ class SharedFileManager:
             agent_config_checksum=_sha256(agent_content),
             groups=tuple(group_bindings),
             total_episodes=total_episodes,
+            launcher_rjob_config_path=launcher_rjob_config_path,
+            launcher_rjob_config_checksum=launcher_rjob_config_checksum,
             gateway_config_source=_join_source(input_source, "gateway"),
             gateway_config_path=str(
                 Path(self._gateway_config_mount_dir) / self._gateway_config_filename
@@ -326,6 +348,12 @@ def _validate_start_config(
         raise FileBindingError("result mount_config is missing")
     if not any(_mount_target(item) == result_target for item in mounts):
         raise FileBindingError(f"result mount target must be {result_target}")
+
+
+def _validate_launcher_rjob_config(document: dict[str, Any]) -> None:
+    rjob = document.get("rjob")
+    if not isinstance(rjob, dict) or not rjob:
+        raise FileBindingError("launcher RJob config must contain a non-empty rjob mapping")
 
 
 def _validate_runner_source(document: dict[str, Any], source_dir: Path) -> None:
