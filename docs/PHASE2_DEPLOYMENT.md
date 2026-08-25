@@ -39,6 +39,10 @@ export SAFACTORY_INITIALIZATION_CONFIG_PATH=/absolute/path/initialization.yaml
 `${NAME}` 会在 Server 启动时从环境变量展开；变量缺失会直接拒绝启动；
 `${NAME:-default}` 可声明默认值。AK/SK、S3 凭据和模型密钥不要写入 Git。
 
+`wt-data-platform-sdk` 与 Safactory 的 `requirements-cloud.txt` 保持一致，固定安装 GitHub
+`v0.4.1`。其运行时 import/factory 为 `wt_sdk:WTGatewayClient`，查询通过该版本公开的
+`query_data` 接口完成。
+
 不再维护独立的 Gateway 配置文件。`gateway.config` 就是 Gateway 的完整业务配置；Server
 在创建 Job 时将它渲染为 `<environment.local_path>/<job_id>/gateway/gateway.yaml`，再通过
 对应的 `environment.rjob_source` 只读挂载到 Gateway RJob 的

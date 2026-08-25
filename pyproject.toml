@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.12,<3",
     "PyYAML>=6,<7",
     "uvicorn>=0.30,<1",
+    "wt-data-platform-sdk @ git+https://github.com/AI45Lab/wt-data-platform-sdk.git@v0.4.1",
 ]
 
 [project.optional-dependencies]

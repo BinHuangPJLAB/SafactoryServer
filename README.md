@@ -30,6 +30,10 @@ set +a
 safactory-job-server
 ```
 
+安装会按 Safactory 的 Cloud requirements 拉取固定版本
+`wt-data-platform-sdk @ git+https://github.com/AI45Lab/wt-data-platform-sdk.git@v0.4.1`；
+构建环境需要能够访问该 Git 仓库。
+
 也可以使用 Uvicorn factory 方式启动：
 
 ```bash

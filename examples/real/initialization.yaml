@@ -9,7 +9,7 @@ image_pull_policy: Always
 # ${NAME} 是必填 Secret；${NAME:-default} 支持显式默认值。
 database:
   control_db_path: ../../runtime/control.db
-  data_platform_factory: wt_data_platform_sdk:create_client
+  data_platform_factory: wt_sdk:WTGatewayClient
   environment:
     WT_SDK_PROFILE: ${WT_SDK_PROFILE:-production}
     WT_SDK_DB_URI: ${WT_SDK_DB_URI}

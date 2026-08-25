@@ -87,7 +87,7 @@ class Settings:
     safactory_timeout_seconds: int = 7200
     orchestrator_poll_seconds: float = 2.0
     rjob_request_timeout_seconds: float = 10.0
-    data_platform_factory: str = "wt_data_platform_sdk:create_client"
+    data_platform_factory: str = "wt_sdk:WTGatewayClient"
 
     def __post_init__(self) -> None:
         if not 1 <= self.port <= 65535:
@@ -279,7 +279,7 @@ class Settings:
             ),
             data_platform_factory=os.getenv(
                 "SAFACTORY_DATA_PLATFORM_FACTORY",
-                "wt_data_platform_sdk:create_client",
+                "wt_sdk:WTGatewayClient",
             ),
         )
 
