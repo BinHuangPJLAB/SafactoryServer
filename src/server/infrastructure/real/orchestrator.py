@@ -6,6 +6,7 @@ import ipaddress
 import json
 import logging
 import re
+import shlex
 from datetime import datetime
 
 from server.config import Settings
@@ -35,6 +36,11 @@ from server.infrastructure.real.rjob import (
 )
 
 LOGGER = logging.getLogger("server.orchestrator")
+DETAIL_LOGGER = logging.getLogger("server.orchestrator.detail")
+_VERBOSE_EVENTS = {
+    "rjob_reconciliation_started",
+    "rjob_reconciliation_completed",
+}
 
 
 class RealJobOrchestrator:
@@ -376,6 +382,13 @@ class RealJobOrchestrator:
             gateway_url=gateway_sessions_url,
             llm_model=gateway_model.llm_model or job.model_id,
         )
+        LOGGER.info(
+            "request_id=%s job_id=%s component=controller "
+            "event=rjob_launch_command command=%s",
+            job.request_id,
+            job.job_id,
+            shlex.join(launcher_command),
+        )
         database_environment = _string_environment(
             _json_object(
                 self._settings.database_environment_json, "database environment"
@@ -462,6 +475,7 @@ class RealJobOrchestrator:
     async def _record_gateway_status(
         self, job: ControlJob, snapshot: RJobSnapshot
     ) -> ControlJob:
+        self._log_rjob_snapshot(job, "gateway", job.gateway_status, snapshot)
         return await self._store.update(
             job.job_id,
             now=self._clock.now(),
@@ -473,6 +487,7 @@ class RealJobOrchestrator:
     async def _record_controller_status(
         self, job: ControlJob, snapshot: RJobSnapshot
     ) -> ControlJob:
+        self._log_rjob_snapshot(job, "controller", job.safactory_status, snapshot)
         summary = snapshot.workload_summary
         return await self._store.update(
             job.job_id,
@@ -532,9 +547,11 @@ class RealJobOrchestrator:
         event_type: str,
         payload: dict[str, object] | None = None,
     ) -> None:
-        LOGGER.info(
+        logger = DETAIL_LOGGER if event_type in _VERBOSE_EVENTS else LOGGER
+        logger_method = logger.debug if event_type in _VERBOSE_EVENTS else logger.info
+        logger_method(
             "request_id=%s job_id=%s phase=%s attempt=%s event=%s "
-            "gateway_rjob_id=%s safactory_rjob_id=%s",
+            "gateway_rjob_id=%s safactory_rjob_id=%s details=%s",
             job.request_id,
             job.job_id,
             job.phase,
@@ -542,10 +559,47 @@ class RealJobOrchestrator:
             event_type,
             job.gateway_rjob_id or "-",
             job.safactory_rjob_id or "-",
+            json.dumps(payload or {}, ensure_ascii=False, sort_keys=True),
         )
         await self._store.add_event(
             job.job_id, event_type, job.phase, self._clock.now(), payload
         )
+
+    @staticmethod
+    def _log_rjob_snapshot(
+        job: ControlJob,
+        component: str,
+        previous_state: str | None,
+        snapshot: RJobSnapshot,
+    ) -> None:
+        DETAIL_LOGGER.debug(
+            "request_id=%s job_id=%s component=%s event=rjob_snapshot "
+            "state=%s ready=%s address=%s port=%s exit_code=%s "
+            "failure_summary=%s workload_summary=%s",
+            job.request_id,
+            job.job_id,
+            component,
+            snapshot.state.value,
+            snapshot.ready,
+            snapshot.address or "-",
+            snapshot.port or "-",
+            snapshot.exit_code if snapshot.exit_code is not None else "-",
+            snapshot.failure_summary or "-",
+            json.dumps(snapshot.workload_summary, sort_keys=True),
+        )
+        if previous_state != snapshot.state.value:
+            LOGGER.info(
+                "request_id=%s job_id=%s component=%s event=rjob_state_changed "
+                "previous_state=%s platform_state=%s exit_code=%s "
+                "failure_summary=%s",
+                job.request_id,
+                job.job_id,
+                component,
+                previous_state or "-",
+                snapshot.state.value,
+                snapshot.exit_code if snapshot.exit_code is not None else "-",
+                snapshot.failure_summary or "-",
+            )
 
     @staticmethod
     def _gateway_has_route(snapshot: RJobSnapshot) -> bool:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from server.infrastructure.real.rjob import (
     BrainPPRJobClient,
@@ -30,6 +31,30 @@ class FakeSDKClient:
                 ),
             )
         ]
+
+
+class TerminalSDKClient:
+    def list(self, names):
+        return [
+            Struct(
+                status=Struct(
+                    current=Struct(name="Succeeded"),
+                    secret_key="must-not-be-logged",
+                ),
+                spec=Struct(
+                    tasks={
+                        "main": Struct(
+                            replicaStatus=[
+                                Struct(status="Succeeded", exitCode=0)
+                            ]
+                        )
+                    }
+                ),
+            )
+        ]
+
+    def logs_rjob(self, name):
+        return "controller completed all episodes successfully"
 
 
 def _adapter() -> BrainPPRJobClient:
@@ -92,3 +117,17 @@ def test_brainpp_adapter_reads_replica_ip_and_builds_sdk_mounts() -> None:
     assert job.spec.tasks["main"].template.containers[0].resources.cpu == 2
     assert job.spec.tasks["main"].template.containers[0].requests.cpu == 1
     assert job.spec.tasks["main"].restart_policy == "Never"
+
+
+def test_brainpp_adapter_records_terminal_status_and_logs(caplog) -> None:
+    adapter = _adapter()
+    adapter._client = TerminalSDKClient()
+    caplog.set_level(logging.DEBUG, logger="server.rjob.detail")
+
+    snapshot = asyncio.run(adapter.get("controller-job"))
+
+    assert snapshot.state == RJobState.SUCCEEDED
+    assert "terminal_state=succeeded" in caplog.text
+    assert "controller completed all episodes successfully" in caplog.text
+    assert '"secret_key": "<redacted>"' in caplog.text
+    assert "must-not-be-logged" not in caplog.text

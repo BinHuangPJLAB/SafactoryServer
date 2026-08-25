@@ -6,13 +6,16 @@ import http.client
 import inspect
 import ipaddress
 import json
+import logging
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import StrEnum
 from typing import Any, Protocol
+
+DETAIL_LOGGER = logging.getLogger("server.rjob.detail")
 
 
 class RJobState(StrEnum):
@@ -191,10 +194,28 @@ class BrainPPRJobClient:
         try:
             jobs = await asyncio.to_thread(self._client.list, [rjob_id])
             if not jobs:
+                DETAIL_LOGGER.debug("rjob_id=%s lookup_result=not_found", rjob_id)
                 return RJobSnapshot(rjob_id, RJobState.UNKNOWN)
             job = jobs[0]
-            state = _brainpp_state(_member(job, "status"))
-            addresses = _extract_rjob_ips(_rjob_replica_statuses(jobs))
+            raw_status = _member(job, "status")
+            state = _brainpp_state(raw_status)
+            replica_statuses = _rjob_replica_statuses(jobs)
+            exit_code = _extract_optional_int(job, {"exitcode", "exit_code"})
+            DETAIL_LOGGER.debug(
+                "rjob_id=%s state_snapshot=%s",
+                rjob_id,
+                json.dumps(
+                    {
+                        "mapped_state": state.value,
+                        "job_status": _safe_log_value(raw_status),
+                        "exit_code": exit_code,
+                        "replica_statuses": _safe_log_value(replica_statuses),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            addresses = _extract_rjob_ips(replica_statuses)
             if not addresses:
                 addresses = _extract_rjob_ips(jobs)
             if not addresses and state == RJobState.RUNNING:
@@ -202,6 +223,20 @@ class BrainPPRJobClient:
                 logged_address = _extract_logged_rjob_ip(logs)
                 if logged_address:
                     addresses = [logged_address]
+            if state in {
+                RJobState.SUCCEEDED,
+                RJobState.FAILED,
+                RJobState.CANCELLED,
+            }:
+                logs = await self._logs(rjob_id)
+                DETAIL_LOGGER.debug(
+                    "rjob_id=%s terminal_state=%s terminal_logs_begin\n%s\n"
+                    "rjob_id=%s terminal_logs_end",
+                    rjob_id,
+                    state.value,
+                    logs or "<no logs returned>",
+                    rjob_id,
+                )
             address = addresses[0] if addresses else None
             return RJobSnapshot(
                 rjob_id=rjob_id,
@@ -209,9 +244,9 @@ class BrainPPRJobClient:
                 ready=state == RJobState.RUNNING,
                 address=address,
                 port=self._gateway_port if address else None,
-                exit_code=_extract_optional_int(job, {"exitcode", "exit_code"}),
+                exit_code=exit_code,
                 failure_summary=(
-                    f"RJob status={_status_text(_member(job, 'status'))}"
+                    f"RJob status={_status_text(raw_status)}"
                     if state in {RJobState.FAILED, RJobState.CANCELLED}
                     else None
                 ),
@@ -234,6 +269,9 @@ class BrainPPRJobClient:
         try:
             raw = await asyncio.to_thread(self._client.logs_rjob, rjob_id)
         except Exception:
+            DETAIL_LOGGER.debug(
+                "rjob_id=%s logs_fetch_failed", rjob_id, exc_info=True
+            )
             return ""
         return _logs_text(raw)
 
@@ -398,6 +436,69 @@ def _coerce_enum(enum_cls: Any, value: Any) -> Any:
 
 def _member(value: Any, name: str) -> Any:
     return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+
+_SENSITIVE_LOG_KEY = re.compile(
+    r"(?:authorization|credential|password|secret|token|api[_-]?key|access[_-]?key)",
+    re.IGNORECASE,
+)
+
+
+def _safe_log_value(
+    value: Any,
+    *,
+    _depth: int = 0,
+    _visited: set[int] | None = None,
+) -> Any:
+    """Convert SDK status structs to JSON values without logging credentials."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        return f"<bytes:{len(value)}>"
+    if _depth >= 12:
+        return "<max-depth>"
+
+    visited = _visited if _visited is not None else set()
+    identity = id(value)
+    if identity in visited:
+        return "<cycle>"
+    visited.add(identity)
+
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "<redacted>"
+                if _SENSITIVE_LOG_KEY.search(str(key))
+                else _safe_log_value(item, _depth=_depth + 1, _visited=visited)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _safe_log_value(item, _depth=_depth + 1, _visited=visited)
+            for item in value
+        ]
+    if is_dataclass(value) and not isinstance(value, type):
+        return _safe_log_value(asdict(value), _depth=_depth + 1, _visited=visited)
+    for method_name in ("model_dump", "dict", "to_dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            with contextlib.suppress(Exception):
+                return _safe_log_value(
+                    method(), _depth=_depth + 1, _visited=visited
+                )
+    with contextlib.suppress(TypeError):
+        return _safe_log_value(
+            {
+                key: item
+                for key, item in vars(value).items()
+                if not str(key).startswith("_")
+            },
+            _depth=_depth + 1,
+            _visited=visited,
+        )
+    return str(value)
 
 
 def _status_text(value: Any) -> str:

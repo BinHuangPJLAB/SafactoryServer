@@ -103,6 +103,18 @@ Control DB 使用 SQLite WAL，部署时应只有一个 writer。每个顶层 RJ
 Server 重启后按已保存的 RJob 名称继续轮询。终态清理顺序为 Safactory launcher、Gateway；
 删除失败会保留清理标记并后台重试。
 
+## 日志与终态诊断
+
+Server 使用两路日志：stdout 保留关键生命周期事件，滚动文件记录 DEBUG 级完整诊断。文件默认
+位于 Control DB 同目录的 `safactory-server.log`，并包含每次对账、BrainPP 返回的 Job/replica
+状态（凭据字段会脱敏）以及 RJob 进入终态时抓取的完整输出。这样即使随后执行 RJob 清理，仍可
+区分“平台上报的 RJob 终态”和 controller 自身输出的业务完成状态。
+
+文件权限为 `0600`，默认单文件 100 MiB、保留 5 个备份。可使用
+`SAFACTORY_LOG_FILE_PATH`、`SAFACTORY_LOG_FILE_LEVEL`、
+`SAFACTORY_LOG_FILE_MAX_BYTES` 和 `SAFACTORY_LOG_FILE_BACKUP_COUNT` 调整；
+`SAFACTORY_LOG_LEVEL` 只控制 stdout。终态输出可能包含任务数据，部署时应限制日志目录权限。
+
 ## 启动检查
 
 服务 startup 会检查：

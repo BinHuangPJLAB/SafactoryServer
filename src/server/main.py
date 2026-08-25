@@ -62,15 +62,31 @@ def create_app(
     settings = settings or Settings.from_env()
     clock = clock or SystemClock()
     identifiers = identifiers or RandomIdentifierFactory()
-    configure_logging(settings.log_level)
+
+    initialization = load_initialization_config(settings.initialization_config_path)
+    settings = apply_initialization_config(settings, initialization)
+    log_file = settings.log_file_path or settings.control_db_path.with_name(
+        "safactory-server.log"
+    )
+    configure_logging(
+        settings.log_level,
+        log_file,
+        file_level=settings.log_file_level,
+        max_bytes=settings.log_file_max_bytes,
+        backup_count=settings.log_file_backup_count,
+    )
+    LOGGER.info(
+        "logging_status=ready stdout_level=%s file_level=%s file=%s",
+        settings.log_level,
+        settings.log_file_level,
+        log_file,
+    )
 
     auth_config = load_auth_config(settings.auth_config_path)
     authenticator = BearerAuthenticator.from_config(auth_config)
     LOGGER.info("auth_status=ready trusted_users=%s", len(auth_config.users))
 
     dependencies = real_dependencies or RealDependencies()
-    initialization = load_initialization_config(settings.initialization_config_path)
-    settings = apply_initialization_config(settings, initialization)
     catalog = RealCatalog(
         settings.range_config_path,
         initialization.gateway.config["llm_routes"],
@@ -195,4 +211,6 @@ def run() -> None:
         host=settings.host,
         port=settings.port,
         workers=1,
+        access_log=False,
+        log_config=None,
     )

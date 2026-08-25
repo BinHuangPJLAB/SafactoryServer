@@ -12,6 +12,8 @@ DEFAULT_RANGE_CONFIG_PATH = Path("/etc/safactory/ranges.yaml")
 DEFAULT_CONTROL_DB_PATH = Path("/var/lib/safactory/control.db")
 DEFAULT_SHARED_STORAGE_ROOT = Path("/mnt/safactory")
 DEFAULT_RESULTS_ROOT = Path("/mnt/safactory/results")
+DEFAULT_LOG_FILE_MAX_BYTES = 100 * 1024 * 1024
+DEFAULT_LOG_FILE_BACKUP_COUNT = 5
 DEFAULT_RUNTIME_NO_PROXY = (
     "localhost,127.0.0.1,::1,10.0.0.0/8,100.96.0.0/12,"
     "172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,"
@@ -27,6 +29,10 @@ class Settings:
     port: int = 8000
     retry_after_seconds: int = 1
     log_level: str = "INFO"
+    log_file_path: Path | None = None
+    log_file_level: str = "DEBUG"
+    log_file_max_bytes: int = DEFAULT_LOG_FILE_MAX_BYTES
+    log_file_backup_count: int = DEFAULT_LOG_FILE_BACKUP_COUNT
     initialization_config_path: Path = DEFAULT_INITIALIZATION_CONFIG_PATH
     range_config_path: Path = DEFAULT_RANGE_CONFIG_PATH
     control_db_path: Path = DEFAULT_CONTROL_DB_PATH
@@ -94,6 +100,8 @@ class Settings:
             raise ValueError("Port must be between 1 and 65535.")
         if self.retry_after_seconds < 1:
             raise ValueError("retry_after_seconds must be positive.")
+        if self.log_file_max_bytes <= 0 or self.log_file_backup_count < 0:
+            raise ValueError("Log rotation limits must be valid.")
         if not 1 <= self.gateway_port <= 65535:
             raise ValueError("gateway_port must be between 1 and 65535.")
         if self.gateway_scheme not in {"http", "https"}:
@@ -148,6 +156,24 @@ class Settings:
             port=int(os.getenv("SAFACTORY_PORT", "8000")),
             retry_after_seconds=int(os.getenv("SAFACTORY_RETRY_AFTER_SECONDS", "1")),
             log_level=os.getenv("SAFACTORY_LOG_LEVEL", "INFO").upper(),
+            log_file_path=(
+                Path(log_file_path).expanduser()
+                if (log_file_path := _optional_env("SAFACTORY_LOG_FILE_PATH"))
+                else None
+            ),
+            log_file_level=os.getenv("SAFACTORY_LOG_FILE_LEVEL", "DEBUG").upper(),
+            log_file_max_bytes=int(
+                os.getenv(
+                    "SAFACTORY_LOG_FILE_MAX_BYTES",
+                    str(DEFAULT_LOG_FILE_MAX_BYTES),
+                )
+            ),
+            log_file_backup_count=int(
+                os.getenv(
+                    "SAFACTORY_LOG_FILE_BACKUP_COUNT",
+                    str(DEFAULT_LOG_FILE_BACKUP_COUNT),
+                )
+            ),
             initialization_config_path=Path(
                 os.getenv(
                     "SAFACTORY_INITIALIZATION_CONFIG_PATH",

@@ -44,6 +44,22 @@ safactory-job-server
 任一真实依赖不可用都会拒绝启动。Job 状态、Gateway IP 和两个顶层 RJob ID 保存在 SQLite
 Control DB 中，服务重启后编排器会继续对账。
 
+## 日志
+
+stdout 只输出请求、启动、RJob 状态变化、Job 终态、清理结果和 warning/error；周期性对账、
+BrainPP SDK 信息、完整 RJob 状态结构及终态 RJob 输出写入滚动文件。默认文件为 Control DB
+同目录下的 `safactory-server.log`，权限为 `0600`，单文件 100 MiB，保留 5 个备份。
+
+可通过以下环境变量覆盖：
+
+- `SAFACTORY_LOG_LEVEL`：stdout 级别，默认 `INFO`；
+- `SAFACTORY_LOG_FILE_PATH`：全量日志路径；
+- `SAFACTORY_LOG_FILE_LEVEL`：文件日志级别，默认 `DEBUG`；
+- `SAFACTORY_LOG_FILE_MAX_BYTES`：单文件轮转大小；
+- `SAFACTORY_LOG_FILE_BACKUP_COUNT`：备份数量。
+
+终态 RJob 输出可能包含任务数据，应只向服务运维人员开放日志文件。
+
 ## Docker
 
 默认 target 以 root 运行，以兼容平台 worker-init：

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,8 +26,21 @@ from server.infrastructure.real.orchestrator import RealJobOrchestrator
 from server.infrastructure.real.rjob import RJobSnapshot, RJobState
 
 
-def test_orders_recovers_and_cleans_top_level_rjobs(tmp_path: Path) -> None:
+def test_orders_recovers_and_cleans_top_level_rjobs(tmp_path: Path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="server.orchestrator")
     asyncio.run(_exercise_orchestrator(tmp_path))
+    launch_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=rjob_launch_command" in record.getMessage()
+    ]
+    assert len(launch_messages) == 1
+    assert "command=python launcher.py --mode rjob" in launch_messages[0]
+    assert (
+        "--gateway-base-url http://gateway.jobs.svc:8080/v1/sessions"
+        in launch_messages[0]
+    )
+    assert "--llm-model kimi-k3" in launch_messages[0]
 
 
 def test_gateway_failure_never_submits_controller(tmp_path: Path) -> None:
