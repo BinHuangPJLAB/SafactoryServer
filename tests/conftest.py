@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from real_helpers import (
+    FakeDataPlatform,
+    FakeRJobClient,
+    ReadyHealthChecker,
+    write_initialization_config,
+    write_real_configs,
+)
 
 from server.config import Settings
-from server.main import create_app
+from server.infrastructure.real.data_platform import DataPlatformRepository
+from server.infrastructure.real.rjob import RJobSnapshot, RJobState
+from server.main import RealDependencies, create_app
 
 TEST_API_KEY = "test-api-key"
 
@@ -48,11 +58,58 @@ users:
     return path
 
 
+def build_real_test_app(
+    root: Path,
+    auth_config_path: Path,
+    clock: FakeClock,
+    data_platform: DataPlatformRepository | None = None,
+):
+    root.mkdir(parents=True, exist_ok=True)
+    write_real_configs(root)
+    initialization = write_initialization_config(root)
+    rjobs = FakeRJobClient(
+        snapshots={
+            "rjob_gateway": RJobSnapshot(
+                "rjob_gateway",
+                RJobState.RUNNING,
+                ready=True,
+                address="gateway.jobs.svc",
+                port=8080,
+            ),
+            "rjob_controller": RJobSnapshot(
+                "rjob_controller",
+                RJobState.SUCCEEDED,
+                workload_summary={
+                    "total": 4,
+                    "running": 0,
+                    "succeeded": 4,
+                    "failed": 0,
+                    "collected": 4,
+                },
+            ),
+        }
+    )
+    return create_app(
+        Settings(
+            auth_config_path=auth_config_path,
+            initialization_config_path=initialization,
+            log_level="WARNING",
+        ),
+        clock=clock,
+        real_dependencies=RealDependencies(
+            rjobs=rjobs,
+            data_platform=data_platform or FakeDataPlatform(),
+            gateway_health=ReadyHealthChecker(),
+        ),
+    )
+
+
 @pytest.fixture
-def client(fake_clock: FakeClock, auth_config_path) -> TestClient:
-    application = create_app(
-        Settings(auth_config_path=auth_config_path, log_level="WARNING"),
-        clock=fake_clock,
+def client(
+    tmp_path: Path, fake_clock: FakeClock, auth_config_path: Path
+) -> TestClient:
+    application = build_real_test_app(
+        tmp_path / "runtime", auth_config_path, fake_clock
     )
     with TestClient(
         application,
@@ -65,7 +122,7 @@ def client(fake_clock: FakeClock, auth_config_path) -> TestClient:
 def created_job(client: TestClient) -> dict[str, str]:
     response = client.post(
         "/v1/jobs",
-        json={"model_id": "model_glm_001", "range_id": "range_web_001"},
+        json={"model_id": "kimi-k3", "range_id": "range_real_001"},
     )
     assert response.status_code == 202
     return response.json()

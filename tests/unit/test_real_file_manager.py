@@ -1,15 +1,17 @@
 from pathlib import Path
 
 import yaml
-from real_helpers import write_real_configs
+from real_helpers import REAL_GATEWAY_ROUTES, write_real_configs
 
 from server.infrastructure.real.configuration import RealCatalog, load_initialization_config
 from server.infrastructure.real.file_manager import SharedFileManager
 
 
 def test_publishes_immutable_grouped_job_files(tmp_path: Path) -> None:
-    models, ranges = write_real_configs(tmp_path)
-    manager = SharedFileManager(tmp_path / "shared", RealCatalog(models, ranges))
+    ranges = write_real_configs(tmp_path)
+    manager = SharedFileManager(
+        tmp_path / "shared", RealCatalog(ranges, REAL_GATEWAY_ROUTES)
+    )
 
     binding = manager.bind("job_real_001", "range_real_001")
     repeated = manager.bind("job_real_001", "range_real_001")
@@ -28,16 +30,20 @@ def test_publishes_immutable_grouped_job_files(tmp_path: Path) -> None:
     assert start["rjob"]["mount_config"] == [
         f"{binding.result_source}:/app/results"
     ]
+    assert yaml.safe_load(
+        Path(binding.input_source, "gateway/gateway.yaml").read_text()
+    ) == {}
+    assert binding.gateway_config_source.endswith("/job_real_001/gateway")
 
 
 def test_uses_cluster_sources_and_copies_environment_runtime_files(
     tmp_path: Path,
 ) -> None:
-    models, ranges = write_real_configs(tmp_path)
+    ranges = write_real_configs(tmp_path)
     (tmp_path / "runner.py").write_text("print('runner')\n", encoding="utf-8")
     manager = SharedFileManager(
         tmp_path / "generated-env",
-        RealCatalog(models, ranges),
+        RealCatalog(ranges, REAL_GATEWAY_ROUTES),
         rjob_root="gpfs://shared/generated-env",
         results_root=tmp_path / "results",
         results_rjob_root="gpfs://shared/results",
@@ -64,15 +70,16 @@ def test_bundled_managed_environment_can_be_bound(
         "AWS_SECRET_ACCESS_KEY": "sk",
         "SAFACTORY_ENV_RJOB_SOURCE": "gpfs://shared/env",
         "SAFACTORY_RESULTS_RJOB_SOURCE": "gpfs://shared/results",
-        "SAFACTORY_GATEWAY_CONFIG_SOURCE_DIR": "gpfs://shared/gateway",
+        "GATEWAY_MODEL_BASE_URL": "https://model.example/v1",
+        "GATEWAY_MODEL_API_KEY": "model-secret",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
     config = load_initialization_config(root / "examples/real/initialization.yaml")
     assert config.catalog is not None
     catalog = RealCatalog(
-        config.catalog.models_path,
         config.catalog.ranges_path,
+        config.gateway.config["llm_routes"],
         config.catalog.environment_root,
     )
     manager = SharedFileManager(
@@ -81,12 +88,32 @@ def test_bundled_managed_environment_can_be_bound(
         rjob_root="gpfs://shared/env",
         results_root=tmp_path / "results",
         results_rjob_root="gpfs://shared/results",
+        gateway_config=config.gateway.config,
+        gateway_config_mount_dir=config.gateway.config_mount_dir,
+        gateway_config_filename=config.gateway.config_filename,
     )
 
-    binding = manager.bind("job_smoke", "range_harbor_smoke_001")
+    binding = manager.bind("job_smoke", "range_cyberrange_smoke_001")
+    full_binding = manager.bind("job_full", "range_cyberrange_full_001")
 
-    runner = Path(binding.input_local_path, "groups/harbor/runner.py")
+    runner = Path(binding.input_local_path, "groups/cyberrange/runner.py")
     assert runner.is_file()
     assert binding.agent_start_config_path == (
-        "/mnt/safactory-job/groups/harbor/start.rjob.yaml"
+        "/mnt/safactory-job/groups/cyberrange/start.rjob.yaml"
     )
+    assert binding.total_episodes == 1
+    assert full_binding.total_episodes == 4
+    rendered_start = yaml.safe_load(
+        Path(
+            binding.input_local_path,
+            "groups/cyberrange/start.rjob.yaml",
+        ).read_text()
+    )
+    mounts = rendered_start["rjob"]["mount_config"]
+    assert any("yxwang/cyberrange:" in mount for mount in mounts)
+    assert any("yxwang:/mnt/shared-storage-user/evoagi-share" in mount for mount in mounts)
+    assert mounts[-1] == f"{binding.result_source}:/app/results"
+    gateway = yaml.safe_load(
+        Path(binding.input_local_path, "gateway/gateway.yaml").read_text()
+    )
+    assert gateway["llm_routes"]["kimi-k3"]["api_key"] == "model-secret"

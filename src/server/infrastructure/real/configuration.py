@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -42,10 +43,12 @@ class RJobConnectionConfig(ConfigModel):
     verifyssl: bool = True
     retries: int = Field(default=3, ge=0)
     no_packaging: bool = True
+    restart_policy: str = Field(default="Never", min_length=1)
     private_machine: str = Field(default="Group", min_length=1)
     host_network: bool | None = None
     auto_delete_duration: str = Field(default="12h", min_length=1)
     max_running_duration: str = Field(default="14h", min_length=1)
+    poll_interval_seconds: float = Field(default=5.0, gt=0)
 
     @model_validator(mode="after")
     def required_endpoint(self) -> Self:
@@ -74,16 +77,15 @@ class StorageConfig(ConfigModel):
 
 
 class CatalogConfig(ConfigModel):
-    models_path: Path
     ranges_path: Path
     environment_root: Path
 
 
 class GatewayRuntimeConfig(ConfigModel):
-    config_local_dir: Path
-    config_source_dir: str = Field(min_length=1)
+    config: dict[str, Any] = Field(min_length=1, repr=False)
     config_mount_dir: str = Field(default="/app/runtime-config", min_length=1)
     config_filename: str = Field(default="gateway.yaml", min_length=1)
+    name_prefix: str = Field(default="safactory-gateway", min_length=1)
     workdir: str = Field(default="/app", min_length=1)
     port: int = Field(default=8000, ge=1, le=65535)
     scheme: Literal["http", "https"] = "http"
@@ -94,6 +96,7 @@ class GatewayRuntimeConfig(ConfigModel):
     resources: dict[str, Any] = Field(
         default_factory=lambda: {"cpu": 1, "gpu": 0, "memory_in_mb": 4096}
     )
+    requests: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def valid_paths(self) -> Self:
@@ -110,6 +113,7 @@ class GatewayRuntimeConfig(ConfigModel):
 
 
 class SafactoryRuntimeConfig(ConfigModel):
+    name_prefix: str = Field(default="safactory", min_length=1)
     workdir: str = Field(default="/app", min_length=1)
     python_bin: str = Field(default="python", min_length=1)
     launcher_rjob_config: str = Field(default="config.yaml", min_length=1)
@@ -124,6 +128,7 @@ class SafactoryRuntimeConfig(ConfigModel):
     resources: dict[str, Any] = Field(
         default_factory=lambda: {"cpu": 4, "gpu": 0, "memory_in_mb": 16384}
     )
+    requests: dict[str, Any] = Field(default_factory=dict)
     episode_rjob_defaults: dict[str, Any] = Field(default_factory=dict)
     launcher_args: tuple[str, ...] = ()
 
@@ -139,42 +144,45 @@ class InitializationConfig(ConfigModel):
     gateway_base_image: str = Field(min_length=1, pattern=r"^\S+$")
     safactory_base_image: str = Field(min_length=1, pattern=r"^\S+$")
     image_pull_policy: Literal["Always", "IfNotPresent", "Never"] = "IfNotPresent"
-    placeholder: bool = False
-    database: DatabaseConfig | None = None
-    rjob: RJobConnectionConfig | None = None
-    storage: StorageConfig | None = None
-    catalog: CatalogConfig | None = None
-    gateway: GatewayRuntimeConfig | None = None
-    safactory: SafactoryRuntimeConfig | None = None
+    database: DatabaseConfig
+    rjob: RJobConnectionConfig
+    storage: StorageConfig
+    catalog: CatalogConfig
+    gateway: GatewayRuntimeConfig
+    safactory: SafactoryRuntimeConfig
     runtime_no_proxy: str | None = None
 
     @model_validator(mode="after")
     def complete_runtime_config(self) -> Self:
-        values = {
-            "database": self.database,
-            "rjob": self.rjob,
-            "storage": self.storage,
-            "catalog": self.catalog,
-            "gateway": self.gateway,
-            "safactory": self.safactory,
-        }
-        configured = [name for name, value in values.items() if value is not None]
-        if configured and len(configured) != len(values):
-            missing = sorted(set(values) - set(configured))
+        gateway_config = self.gateway.config
+        if gateway_config.get("listen_port") != self.gateway.port:
+            raise ValueError("gateway.config.listen_port must match gateway.port")
+        if gateway_config.get("base_session_path") != self.gateway.sessions_path:
             raise ValueError(
-                "real runtime configuration is incomplete; missing: "
-                + ", ".join(missing)
+                "gateway.config.base_session_path must match gateway.sessions_path"
             )
+        if gateway_config.get("storage_type") != self.safactory.storage_type:
+            raise ValueError(
+                "gateway.config.storage_type must match safactory.storage_type"
+            )
+        routes = gateway_config.get("llm_routes")
+        if not isinstance(routes, dict) or not routes:
+            raise ValueError("gateway.config.llm_routes must be a non-empty object")
+        for model_name, route in routes.items():
+            if not isinstance(model_name, str) or not model_name.strip():
+                raise ValueError("gateway.config.llm_routes keys must be model names")
+            if model_name != model_name.strip():
+                raise ValueError("Gateway model names must not contain outer whitespace")
+            if not isinstance(route, dict) or not route:
+                raise ValueError(
+                    f"Gateway route must be a non-empty object: {model_name}"
+                )
         return self
-
-    @property
-    def runtime_configured(self) -> bool:
-        return self.database is not None
 
 
 class GatewayModelConfig(ConfigModel):
-    route: dict[str, Any] = Field(min_length=1)
-    environment: dict[str, str] = Field(default_factory=dict)
+    route: dict[str, Any] = Field(min_length=1, repr=False)
+    environment: dict[str, str] = Field(default_factory=dict, repr=False)
     llm_model: str | None = None
 
 
@@ -183,18 +191,6 @@ class ModelConfig(ConfigModel):
     name: str = Field(min_length=1)
     available: bool = True
     gateway: GatewayModelConfig
-
-
-class ModelDocument(ConfigModel):
-    schema_version: Literal["1.0"]
-    models: tuple[ModelConfig, ...] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def unique_ids(self) -> Self:
-        ids = [item.model_id for item in self.models]
-        if len(ids) != len(set(ids)):
-            raise ValueError("model_id values must be unique")
-        return self
 
 
 class RangeGroupConfig(ConfigModel):
@@ -207,7 +203,6 @@ class RangeConfig(ConfigModel):
     range_id: str = Field(min_length=1)
     available: bool = True
     availability_retryable: bool = False
-    supported_models: tuple[str, ...] = Field(min_length=1)
     agent_config: Path
     groups: tuple[RangeGroupConfig, ...] = Field(min_length=1)
 
@@ -232,46 +227,31 @@ class RangeDocument(ConfigModel):
 
 
 class RealCatalog:
-    """Reloads trusted YAML for every operation so creation revalidates availability."""
+    """Uses Gateway route names as model IDs and reloads Range YAML on access."""
 
     def __init__(
-        self, model_path: Path, range_path: Path, environment_root: Path | None = None
+        self,
+        range_path: Path,
+        gateway_routes: dict[str, Any],
+        environment_root: Path | None = None,
     ) -> None:
-        self.model_path = model_path
         self.range_path = range_path
+        self.gateway_routes = deepcopy(gateway_routes)
         self.environment_root = environment_root or range_path.parent
 
     async def preflight(self) -> None:
-        models = self._models()
-        ranges = self._ranges()
-        known_models = {item.model_id for item in models.models}
-        unknown = {
-            model_id
-            for item in ranges.ranges
-            for model_id in item.supported_models
-            if model_id not in known_models
-        }
-        if unknown:
-            raise TrustedConfigError(
-                f"ranges reference unknown model IDs: {sorted(unknown)}"
-            )
+        self._ranges()
 
     async def list_models(self) -> tuple[Model, ...]:
-        try:
-            document = self._models()
-        except TrustedConfigError as exc:
-            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE) from exc
-        return tuple(Model(item.model_id, item.name, item.available) for item in document.models)
+        return tuple(
+            Model(model_name, model_name, True)
+            for model_name in self.gateway_routes
+        )
 
     async def get_model(self, model_id: str) -> Model | None:
-        try:
-            item = next(
-                (item for item in self._models().models if item.model_id == model_id),
-                None,
-            )
-        except TrustedConfigError as exc:
-            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE) from exc
-        return None if item is None else Model(item.model_id, item.name, item.available)
+        if model_id not in self.gateway_routes:
+            return None
+        return Model(model_id, model_id, True)
 
     async def get_range(self, range_id: str) -> Range | None:
         try:
@@ -284,12 +264,19 @@ class RealCatalog:
             range_id=item.range_id,
             available=item.available,
             availability_retryable=item.availability_retryable,
-            supported_model_ids=frozenset(item.supported_models),
         )
 
     def resolve_model(self, model_id: str) -> ModelConfig | None:
-        return next(
-            (item for item in self._models().models if item.model_id == model_id), None
+        route = self.gateway_routes.get(model_id)
+        if route is None:
+            return None
+        return ModelConfig(
+            model_id=model_id,
+            name=model_id,
+            gateway=GatewayModelConfig(
+                route=deepcopy(route),
+                llm_model=model_id,
+            ),
         )
 
     def resolve_range(self, range_id: str) -> RangeConfig | None:
@@ -298,15 +285,12 @@ class RealCatalog:
         )
 
     def model_checksum(self) -> str:
-        return _checksum(self.model_path.read_bytes())
+        return _checksum(canonical_json(self.gateway_routes).encode("utf-8"))
 
     def resolve_source(self, configured_path: Path) -> Path:
         if configured_path.is_absolute():
             return configured_path
         return (self.environment_root / configured_path).resolve()
-
-    def _models(self) -> ModelDocument:
-        return _load_yaml(self.model_path, ModelDocument)
 
     def _ranges(self) -> RangeDocument:
         return _load_yaml(self.range_path, RangeDocument)
@@ -338,17 +322,8 @@ def apply_initialization_config(
     settings: Settings, config: InitializationConfig
 ) -> Settings:
     """Overlay the complete real-runtime YAML onto process-level settings."""
-    if not config.runtime_configured:
-        return settings
-    assert config.database is not None
-    assert config.rjob is not None
-    assert config.storage is not None
-    assert config.catalog is not None
-    assert config.gateway is not None
-    assert config.safactory is not None
     return replace(
         settings,
-        model_config_path=config.catalog.models_path,
         range_config_path=config.catalog.ranges_path,
         control_db_path=config.database.control_db_path,
         data_platform_factory=config.database.data_platform_factory,
@@ -368,16 +343,18 @@ def apply_initialization_config(
         rjob_verifyssl=config.rjob.verifyssl,
         rjob_retries=config.rjob.retries,
         rjob_no_packaging=config.rjob.no_packaging,
+        rjob_restart_policy=config.rjob.restart_policy,
         rjob_namespace=config.rjob.namespace,
         charged_group=config.rjob.charged_group,
         rjob_private_machine=config.rjob.private_machine,
         rjob_host_network=config.rjob.host_network,
         rjob_auto_delete_duration=config.rjob.auto_delete_duration,
         rjob_max_running_duration=config.rjob.max_running_duration,
-        gateway_config_local_dir=config.gateway.config_local_dir,
-        gateway_config_source_dir=config.gateway.config_source_dir,
+        orchestrator_poll_seconds=config.rjob.poll_interval_seconds,
+        gateway_config_json=canonical_json(config.gateway.config),
         gateway_config_mount_dir=config.gateway.config_mount_dir,
         gateway_config_filename=config.gateway.config_filename,
+        gateway_name_prefix=config.gateway.name_prefix,
         gateway_workdir=config.gateway.workdir,
         gateway_port=config.gateway.port,
         gateway_scheme=config.gateway.scheme,
@@ -386,7 +363,9 @@ def apply_initialization_config(
         gateway_health_timeout_seconds=config.gateway.health_timeout_seconds,
         gateway_ready_timeout_seconds=config.gateway.ready_timeout_seconds,
         gateway_resources_json=canonical_json(config.gateway.resources),
+        gateway_requests_json=canonical_json(config.gateway.requests),
         runtime_no_proxy=config.runtime_no_proxy or settings.runtime_no_proxy,
+        safactory_name_prefix=config.safactory.name_prefix,
         safactory_workdir=config.safactory.workdir,
         safactory_python_bin=config.safactory.python_bin,
         safactory_launcher_rjob_config=config.safactory.launcher_rjob_config,
@@ -401,6 +380,7 @@ def apply_initialization_config(
         safactory_enable_evaluation=config.safactory.enable_evaluation,
         safactory_timeout_seconds=config.safactory.timeout_seconds,
         safactory_resources_json=canonical_json(config.safactory.resources),
+        safactory_requests_json=canonical_json(config.safactory.requests),
         episode_rjob_defaults_json=canonical_json(
             config.safactory.episode_rjob_defaults
         ),
@@ -408,7 +388,9 @@ def apply_initialization_config(
     )
 
 
-_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV_REFERENCE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}"
+)
 
 
 def _expand_environment(value: Any) -> Any:
@@ -423,6 +405,9 @@ def _expand_environment(value: Any) -> Any:
         name = match.group(1)
         result = os.getenv(name)
         if result is None or not result.strip():
+            default = match.group(2)
+            if default is not None:
+                return default
             raise ValueError(f"required environment variable is unset: {name}")
         return result
 
@@ -432,12 +417,10 @@ def _expand_environment(value: Any) -> Any:
 def _resolve_runtime_paths(document: dict[str, Any], base: Path) -> None:
     paths = (
         ("database", "control_db_path"),
-        ("catalog", "models_path"),
         ("catalog", "ranges_path"),
         ("catalog", "environment_root"),
         ("storage", "environment", "local_path"),
         ("storage", "results", "local_path"),
-        ("gateway", "config_local_dir"),
     )
     for keys in paths:
         current: Any = document

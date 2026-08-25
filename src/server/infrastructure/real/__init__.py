@@ -1,1 +1,1 @@
-"""Production adapters used by Phase 2 real mode."""
+"""Production adapters for RJob orchestration and data queries."""

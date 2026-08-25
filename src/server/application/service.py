@@ -55,12 +55,6 @@ class JobService:
                 {"range_id": range_id},
                 retryable=range_config.availability_retryable,
             )
-        if model_id not in range_config.supported_model_ids:
-            raise DomainError(
-                ErrorCode.MODEL_RANGE_NOT_SUPPORTED,
-                {"model_id": model_id, "range_id": range_id},
-            )
-
         return await self._runtime.create_job(model_id, range_id)
 
     async def list_sessions(self, job_id: str) -> JobSessions:

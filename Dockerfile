@@ -9,14 +9,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=120 \
     PIP_RETRIES=10 \
-    SAFACTORY_MODE=mock \
+    SAFACTORY_INITIALIZATION_CONFIG_PATH=/app/examples/real/initialization.yaml \
     SAFACTORY_HOST=0.0.0.0 \
     SAFACTORY_PORT=8000
 
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY env ./env
-COPY examples/real ./config/real
+COPY examples/real ./examples/real
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url "${PIP_INDEX_URL}" .
 

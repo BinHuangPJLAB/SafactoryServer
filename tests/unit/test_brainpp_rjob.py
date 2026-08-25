@@ -75,7 +75,10 @@ def test_brainpp_adapter_reads_replica_ip_and_builds_sdk_mounts() -> None:
         environment={"PYTHONUNBUFFERED": "1"},
         command=gateway_command("/app/runtime-config/gateway.yaml"),
         mounts=(MountSpec("gpfs://shared/gateway", "/app/runtime-config", True),),
+        resources={"cpu": 2, "memory_in_mb": 4096},
+        requests={"cpu": 1, "memory_in_mb": 2048},
         daemon=True,
+        restart_policy="Never",
     )
     job = adapter._build_job(spec)
 
@@ -86,3 +89,6 @@ def test_brainpp_adapter_reads_replica_ip_and_builds_sdk_mounts() -> None:
         "gpfs://shared/gateway:/app/runtime-config"
     ]
     assert job.spec.tasks["main"].daemon is True
+    assert job.spec.tasks["main"].template.containers[0].resources.cpu == 2
+    assert job.spec.tasks["main"].template.containers[0].requests.cpu == 1
+    assert job.spec.tasks["main"].restart_policy == "Never"

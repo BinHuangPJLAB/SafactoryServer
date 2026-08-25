@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "safactory-job-server"
 version = "0.2.0"
-description = "Safactory Job Server with mock and durable RJob orchestration modes"
+description = "Safactory Job Server with durable RJob orchestration"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -30,7 +30,7 @@ safactory-job-server = "server.main:run"
 where = ["src"]
 
 [tool.setuptools.package-data]
-server = ["auth/*.yaml", "configs/*.yaml", "fixtures/mock/v1/*.yaml"]
+server = ["auth/*.yaml", "configs/*.yaml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

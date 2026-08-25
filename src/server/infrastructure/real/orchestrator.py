@@ -7,7 +7,6 @@ import json
 import logging
 import re
 from datetime import datetime
-from pathlib import Path
 
 from server.config import Settings
 from server.domain.entities import JobStatus
@@ -71,8 +70,11 @@ class RealJobOrchestrator:
         database_environment = _json_object(
             self._settings.database_environment_json, "database environment"
         )
+        _json_object(self._settings.gateway_config_json, "Gateway configuration")
         _json_object(self._settings.gateway_resources_json, "gateway resources")
+        _json_object(self._settings.gateway_requests_json, "gateway requests")
         _json_object(self._settings.safactory_resources_json, "controller resources")
+        _json_object(self._settings.safactory_requests_json, "controller requests")
         _json_object(self._settings.episode_rjob_defaults_json, "episode defaults")
         _json_string_list(
             self._settings.safactory_launcher_args_json, "launcher arguments"
@@ -82,22 +84,6 @@ class RealJobOrchestrator:
             and self._settings.safactory_storage_type == "cloud"
         ):
             _validate_cloud_environment(database_environment)
-        if self._settings.gateway_config_local_dir is not None:
-            gateway_config = (
-                self._settings.gateway_config_local_dir
-                / self._settings.gateway_config_filename
-            )
-            if not gateway_config.is_file():
-                raise TrustedConfigError(
-                    f"Gateway configuration is unavailable: {gateway_config}"
-                )
-        if (
-            self._settings.rjob_backend == "brainpp"
-            and not self._settings.gateway_config_source_dir
-        ):
-            raise TrustedConfigError(
-                "direct RJob mode requires gateway config_source_dir"
-            )
         await self._catalog.preflight()
         self._files.preflight()
         await self._store.initialize()
@@ -178,7 +164,7 @@ class RealJobOrchestrator:
 
         binding = JobFileBinding.from_json(job.binding_json)
         if job.gateway_rjob_id is None:
-            job = await self._submit_gateway(job)
+            job = await self._submit_gateway(job, binding)
             if job.terminal or job.gateway_rjob_id is None:
                 return
 
@@ -292,7 +278,9 @@ class RealJobOrchestrator:
         )
         return job
 
-    async def _submit_gateway(self, job: ControlJob) -> ControlJob:
+    async def _submit_gateway(
+        self, job: ControlJob, binding: JobFileBinding
+    ) -> ControlJob:
         try:
             gateway_model = GatewayModelConfig.model_validate_json(
                 job.model_gateway_json
@@ -320,7 +308,9 @@ class RealJobOrchestrator:
             "GATEWAY_LISTEN_PORT": str(self._settings.gateway_port),
         }
         spec = RJobSpec(
-            name=_safe_rjob_name(f"safactory-gateway-{job.job_id}"),
+            name=_safe_rjob_name(
+                f"{self._settings.gateway_name_prefix}-{job.job_id}"
+            ),
             idempotency_key=f"{job.job_id}:gateway",
             namespace=self._settings.rjob_namespace,
             charged_group=self._settings.charged_group,
@@ -332,27 +322,24 @@ class RealJobOrchestrator:
                 "safactory.brainpp.cn/component": "gateway",
             },
             environment=environment,
-            command=gateway_command(
-                str(
-                    Path(self._settings.gateway_config_mount_dir)
-                    / self._settings.gateway_config_filename
-                )
-            ),
+            command=gateway_command(binding.gateway_config_path),
             working_dir=self._settings.gateway_workdir,
             mounts=(
                 MountSpec(
-                    self._settings.gateway_config_source_dir,
+                    binding.gateway_config_source,
                     self._settings.gateway_config_mount_dir,
                     True,
                 ),
-            )
-            if self._settings.gateway_config_source_dir
-            else (),
+            ),
             resources=_json_object(
                 self._settings.gateway_resources_json, "gateway resources"
             ),
+            requests=_json_object(
+                self._settings.gateway_requests_json, "gateway requests"
+            ),
             timeout_seconds=self._settings.safactory_timeout_seconds,
             daemon=True,
+            restart_policy=self._settings.rjob_restart_policy,
             private_machine=self._settings.rjob_private_machine,
             host_network=self._settings.rjob_host_network,
             auto_delete_duration=self._settings.rjob_auto_delete_duration,
@@ -403,7 +390,9 @@ class RealJobOrchestrator:
             "RJOB_GATEWAY_BASE_URL": gateway_sessions_url,
         }
         spec = RJobSpec(
-            name=_safe_rjob_name(f"safactory-{job.job_id}"),
+            name=_safe_rjob_name(
+                f"{self._settings.safactory_name_prefix}-{job.job_id}"
+            ),
             idempotency_key=f"{job.job_id}:controller",
             namespace=self._settings.rjob_namespace,
             charged_group=self._settings.charged_group,
@@ -446,7 +435,11 @@ class RealJobOrchestrator:
             resources=_json_object(
                 self._settings.safactory_resources_json, "controller resources"
             ),
+            requests=_json_object(
+                self._settings.safactory_requests_json, "controller requests"
+            ),
             timeout_seconds=self._settings.safactory_timeout_seconds,
+            restart_policy=self._settings.rjob_restart_policy,
             private_machine=self._settings.rjob_private_machine,
             host_network=self._settings.rjob_host_network,
             auto_delete_duration=self._settings.rjob_auto_delete_duration,

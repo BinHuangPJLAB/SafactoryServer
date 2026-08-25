@@ -18,10 +18,10 @@ from server.infrastructure.real.rjob import RJobSnapshot, RJobState
 from server.main import RealDependencies, create_app
 
 
-def test_real_mode_runs_and_queries_only_the_sdk(
+def test_real_flow_runs_and_queries_only_the_sdk(
     tmp_path: Path, auth_config_path: Path, fake_clock: FakeClock
 ) -> None:
-    models, ranges = write_real_configs(tmp_path)
+    ranges = write_real_configs(tmp_path)
     initialization = write_initialization_config(tmp_path)
     with auth_config_path.open("a", encoding="utf-8") as config:
         config.write("  - username: other-user\n    api_key: other-api-key\n")
@@ -49,10 +49,8 @@ def test_real_mode_runs_and_queries_only_the_sdk(
     )
     data = FakeDataPlatform()
     settings = Settings(
-        mode="real",
         auth_config_path=auth_config_path,
         initialization_config_path=initialization,
-        model_config_path=models,
         range_config_path=ranges,
         control_db_path=tmp_path / "control.db",
         shared_storage_root=tmp_path / "shared",
@@ -74,11 +72,14 @@ def test_real_mode_runs_and_queries_only_the_sdk(
         headers={"Authorization": f"Bearer {TEST_API_KEY}"},
     ) as client:
         assert client.get("/v1/models").json() == {
-            "items": [{"model_id": "model_real_001", "name": "Real Route"}]
+            "items": [
+                {"model_id": "kimi-k3", "name": "kimi-k3"},
+                {"model_id": "qwen-max", "name": "qwen-max"},
+            ]
         }
         created = client.post(
             "/v1/jobs",
-            json={"model_id": "model_real_001", "range_id": "range_real_001"},
+            json={"model_id": "kimi-k3", "range_id": "range_real_001"},
         )
         assert created.status_code == 202
         job_id = created.json()["job_id"]

@@ -1,5 +1,128 @@
 schema_version: "1.0"
-gateway_base_image: mock.local/safactory-gateway:phase2-placeholder
-safactory_base_image: mock.local/safactory-controller:phase2-placeholder
-image_pull_policy: IfNotPresent
-placeholder: true
+
+# 真实调度的唯一初始化配置。部署可通过
+# SAFACTORY_INITIALIZATION_CONFIG_PATH 指向此文件的外部副本。
+gateway_base_image: registry.h.pjlab.org.cn/ailab-evobox-evobox_proxy/server:safactory003
+safactory_base_image: registry.h.pjlab.org.cn/ailab-evobox-evobox_proxy/server:safactory003
+image_pull_policy: Always
+
+database:
+  control_db_path: ../../../runtime/control.db
+  data_platform_factory: wt_data_platform_sdk:create_client
+  environment:
+    WT_SDK_PROFILE: ${WT_SDK_PROFILE:-production}
+    WT_SDK_DB_URI: ${WT_SDK_DB_URI}
+    WT_SDK_ENV_CONFIG_DB_URI: ${WT_SDK_ENV_CONFIG_DB_URI}
+    WT_SDK_S3_ENDPOINT: ${WT_SDK_S3_ENDPOINT}
+    WT_SDK_S3_ALLOW_HTTP: ${WT_SDK_S3_ALLOW_HTTP:-true}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    AWS_REGION: ${AWS_REGION:-cn-shanghai}
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-cn-shanghai}
+    AWS_EC2_METADATA_DISABLED: ${AWS_EC2_METADATA_DISABLED:-true}
+
+rjob:
+  backend: brainpp
+  cluster_entry: https://h.pjlab.org.cn
+  namespace: ailab-evobox
+  charged_group: evobox_proxy
+  access_key: ${RJOB_ACCESS_KEY}
+  secret_key: ${RJOB_SECRET_KEY}
+  verifyssl: true
+  retries: 3
+  no_packaging: true
+  restart_policy: Never
+  private_machine: Group
+  host_network: false
+  auto_delete_duration: 12h
+  max_running_duration: 14h
+  poll_interval_seconds: 5
+
+storage:
+  environment:
+    local_path: ../../../runtime/env
+    rjob_source: ${SAFACTORY_ENV_RJOB_SOURCE}
+    mount_path: /app/env
+  results:
+    local_path: ../../../runtime/results
+    rjob_source: ${SAFACTORY_RESULTS_RJOB_SOURCE}
+    mount_path: /app/results
+
+catalog:
+  ranges_path: ../../../examples/real/ranges.yaml
+  environment_root: ../../../env
+
+gateway:
+  name_prefix: safactory-gateway
+  config_mount_dir: /app/runtime-config
+  config_filename: gateway.yaml
+  workdir: /app
+  port: 8000
+  scheme: http
+  health_path: /readyz
+  sessions_path: /v1/sessions
+  ready_timeout_seconds: 900
+  health_timeout_seconds: 3
+  resources:
+    cpu: 1
+    gpu: 0
+    memory_in_mb: 4096
+  requests: {}
+  config:
+    listen_host: 0.0.0.0
+    listen_port: 8000
+    base_session_path: /v1/sessions
+    max_steps: -1
+    storage_type: cloud
+    storage_config: {}
+    telemetry:
+      mode: strict
+      loss_policy: fail_closed
+      capture_payload: full
+      payload_sample_rate: 1.0
+      redact_sensitive_fields: true
+      batch_size: 200
+      flush_interval_ms: 100
+    request_log:
+      enabled: true
+      path: /app/logs/gateway_requests.jsonl
+      max_bytes: 104857600
+      backup_count: 5
+      body_limit_bytes: 0
+    llm_routes:
+      kimi-k3:
+        base_url: ${GATEWAY_MODEL_BASE_URL}
+        api_key: ${GATEWAY_MODEL_API_KEY}
+        supports_stream: true
+        max_concurrency: 256
+
+safactory:
+  name_prefix: safactory
+  workdir: /app
+  python_bin: python
+  launcher_rjob_config: config.yaml
+  storage_type: cloud
+  pool_size: 10
+  multiplier: 1.0
+  max_workers: 10
+  max_steps: 150
+  agent_start_timeout_seconds: 9000
+  enable_evaluation: true
+  timeout_seconds: 50400
+  resources:
+    cpu: 4
+    gpu: 0
+    memory_in_mb: 16384
+  requests: {}
+  episode_rjob_defaults:
+    name_prefix: safactory
+    poll_interval_s: 5
+    cleanup_on_finish: true
+    keep_failed_jobs: false
+    no_packaging: true
+    auto_delete_duration: 12h
+    submit_concurrency: 1
+  launcher_args: []
+
+runtime_no_proxy: localhost,127.0.0.1,::1,10.0.0.0/8,100.96.0.0/12,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,.pjlab.local,.pjlab.org.cn,.pjh-service.org.cn,kubernetes.default.svc

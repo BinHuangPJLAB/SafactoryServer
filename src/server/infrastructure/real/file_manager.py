@@ -48,6 +48,9 @@ class JobFileBinding:
     agent_config_checksum: str
     groups: tuple[EnvironmentBinding, ...]
     total_episodes: int
+    gateway_config_source: str = ""
+    gateway_config_path: str = "/app/runtime-config/gateway.yaml"
+    gateway_config_checksum: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, sort_keys=True)
@@ -58,6 +61,11 @@ class JobFileBinding:
         raw["groups"] = tuple(EnvironmentBinding(**item) for item in raw["groups"])
         raw.setdefault("input_local_path", raw["input_source"])
         raw.setdefault("result_local_path", raw["result_source"])
+        raw.setdefault(
+            "gateway_config_source", _join_source(raw["input_source"], "gateway")
+        )
+        raw.setdefault("gateway_config_path", "/app/runtime-config/gateway.yaml")
+        raw.setdefault("gateway_config_checksum", "")
         if "agent_start_config_path" not in raw:
             if len(raw["groups"]) != 1:
                 raise FileBindingError(
@@ -83,6 +91,9 @@ class SharedFileManager:
         results_rjob_root: str | None = None,
         input_target: str = INPUT_TARGET,
         result_target: str = RESULT_TARGET,
+        gateway_config: dict[str, Any] | None = None,
+        gateway_config_mount_dir: str = "/app/runtime-config",
+        gateway_config_filename: str = "gateway.yaml",
     ) -> None:
         self._root = root
         self._rjob_root = str(rjob_root or root)
@@ -90,6 +101,14 @@ class SharedFileManager:
         self._results_rjob_root = str(results_rjob_root or self._results_root)
         self._input_target = input_target.rstrip("/") or "/"
         self._result_target = result_target.rstrip("/") or "/"
+        if not Path(gateway_config_mount_dir).is_absolute():
+            raise ValueError("gateway_config_mount_dir must be an absolute path")
+        filename = Path(gateway_config_filename)
+        if filename.is_absolute() or ".." in filename.parts:
+            raise ValueError("gateway_config_filename must stay inside its mount")
+        self._gateway_config = dict(gateway_config or {})
+        self._gateway_config_mount_dir = gateway_config_mount_dir.rstrip("/") or "/"
+        self._gateway_config_filename = gateway_config_filename
         self._catalog = catalog
 
     def preflight(self) -> None:
@@ -201,8 +220,13 @@ class SharedFileManager:
             rendered_start = dict(start_document)
             rendered_rjob = dict(rendered_start["rjob"])
             rendered_rjob["mount_config"] = [
-                f"{result_source}:{self._result_target}"
+                mount
+                for mount in rendered_rjob["mount_config"]
+                if _mount_target(mount) != self._result_target
             ]
+            rendered_rjob["mount_config"].append(
+                f"{result_source}:{self._result_target}"
+            )
             rendered_start["rjob"] = rendered_rjob
             start_content = _dump_yaml(rendered_start)
             (group_dir / "start.rjob.yaml").write_bytes(start_content)
@@ -227,6 +251,12 @@ class SharedFileManager:
 
         agent_content = _dump_yaml(agent_document)
         (staging / "config.yaml").write_bytes(agent_content)
+        gateway_content = _dump_yaml(self._gateway_config)
+        gateway_directory = staging / "gateway"
+        gateway_directory.mkdir()
+        (gateway_directory / self._gateway_config_filename).write_bytes(
+            gateway_content
+        )
         input_source = _join_source(self._rjob_root, job_id)
         only_group = range_config.groups[0]
         return JobFileBinding(
@@ -245,6 +275,11 @@ class SharedFileManager:
             agent_config_checksum=_sha256(agent_content),
             groups=tuple(group_bindings),
             total_episodes=total_episodes,
+            gateway_config_source=_join_source(input_source, "gateway"),
+            gateway_config_path=str(
+                Path(self._gateway_config_mount_dir) / self._gateway_config_filename
+            ),
+            gateway_config_checksum=_sha256(gateway_content),
         )
 
 

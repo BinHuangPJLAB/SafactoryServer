@@ -13,35 +13,30 @@ from server.domain.entities import (
 )
 from server.infrastructure.real.rjob import RJobSnapshot, RJobSpec, RJobState
 
+REAL_GATEWAY_ROUTES = {
+    "kimi-k3": {
+        "base_url": "https://model.example/v1",
+        "api_key": "test-model-secret",
+        "supports_stream": True,
+    },
+    "qwen-max": {
+        "base_url": "https://second-model.example/v1",
+        "api_key": "test-second-model-secret",
+    },
+}
 
-def write_real_configs(root: Path) -> tuple[Path, Path]:
-    models = root / "models.yaml"
+
+def write_real_configs(root: Path) -> Path:
     ranges = root / "ranges.yaml"
     agent = root / "agent.yaml"
     dataset = root / "dataset.jsonl"
     start = root / "browser.start.yaml"
-    models.write_text(
-        """
-schema_version: "1.0"
-models:
-  - model_id: model_real_001
-    name: Real Route
-    available: true
-    gateway:
-      route:
-        provider: deployment-route
-      environment:
-        MODEL_CREDENTIAL_REF: secret/model-real
-""".strip(),
-        encoding="utf-8",
-    )
     ranges.write_text(
         """
 schema_version: "1.0"
 ranges:
   - range_id: range_real_001
     available: true
-    supported_models: [model_real_001]
     agent_config: agent.yaml
     groups:
       - env_name: browser
@@ -56,7 +51,7 @@ environments:
   - env_name: browser
     env_image: registry.example/env@sha256:abc
     env_num: 2
-    dataset: placeholder.jsonl
+    dataset: dataset.jsonl
     env_params:
       locale: en-US
 """.strip(),
@@ -77,7 +72,7 @@ rjob:
 """.strip(),
         encoding="utf-8",
     )
-    return models, ranges
+    return ranges
 
 
 def write_initialization_config(root: Path) -> Path:
@@ -88,7 +83,42 @@ schema_version: "1.0"
 gateway_base_image: registry/gateway@sha256:1
 safactory_base_image: registry/controller@sha256:2
 image_pull_policy: IfNotPresent
-placeholder: true
+database:
+  control_db_path: control.db
+  data_platform_factory: unused:create_client
+  environment: {}
+rjob:
+  backend: http
+  endpoint: https://rjob.invalid
+  namespace: test
+  charged_group: test
+  poll_interval_seconds: 0.01
+storage:
+  environment:
+    local_path: shared
+    rjob_source: /shared
+    mount_path: /mnt/safactory-job
+  results:
+    local_path: results
+    rjob_source: /results
+    mount_path: /app/results
+catalog:
+  ranges_path: ranges.yaml
+  environment_root: .
+gateway:
+  config:
+    listen_port: 8000
+    base_session_path: /v1/sessions
+    storage_type: sqlite
+    llm_routes:
+      kimi-k3:
+        base_url: https://model.example/v1
+        api_key: test-model-secret
+      qwen-max:
+        base_url: https://second-model.example/v1
+        api_key: test-second-model-secret
+safactory:
+  storage_type: sqlite
 """.strip(),
         encoding="utf-8",
     )

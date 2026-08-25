@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 from conftest import FakeClock
 from real_helpers import (
+    REAL_GATEWAY_ROUTES,
     FakeRJobClient,
     ReadyHealthChecker,
     write_initialization_config,
@@ -32,20 +34,18 @@ def test_gateway_failure_never_submits_controller(tmp_path: Path) -> None:
 
 
 async def _exercise_orchestrator(tmp_path: Path) -> None:
-    models, ranges = write_real_configs(tmp_path)
+    ranges = write_real_configs(tmp_path)
     initialization = load_initialization_config(write_initialization_config(tmp_path))
     settings = Settings(
-        mode="real",
         auth_config_path=tmp_path / "unused-auth.yaml",
         initialization_config_path=tmp_path / "initialization.yaml",
-        model_config_path=models,
         range_config_path=ranges,
         control_db_path=tmp_path / "control.db",
         shared_storage_root=tmp_path / "shared",
         rjob_endpoint="https://rjob.invalid",
     )
     clock = FakeClock(current=datetime(2026, 8, 22, tzinfo=UTC))
-    catalog = RealCatalog(models, ranges)
+    catalog = RealCatalog(ranges, REAL_GATEWAY_ROUTES)
     store = SQLiteControlStore(settings.control_db_path)
     files = SharedFileManager(settings.shared_storage_root, catalog)
     rjobs = FakeRJobClient(
@@ -78,10 +78,10 @@ async def _exercise_orchestrator(tmp_path: Path) -> None:
         job_id="job_real_001",
         request_id="req_test",
         owner_username="test-user",
-        model_id="model_real_001",
+        model_id="kimi-k3",
         model_checksum=catalog.model_checksum(),
         model_gateway_json=(
-            catalog.resolve_model("model_real_001").gateway.model_dump_json()
+            catalog.resolve_model("kimi-k3").gateway.model_dump_json()
         ),
         range_id="range_real_001",
         gateway_image=initialization.gateway_base_image,
@@ -100,6 +100,16 @@ async def _exercise_orchestrator(tmp_path: Path) -> None:
         "http://gateway.jobs.svc:8080/v1/sessions"
     )
     assert rjobs.created[0].command[:2] == ("python", "-c")
+    assert rjobs.created[0].environment["SAFACTORY_MODEL_ID"] == "kimi-k3"
+    assert json.loads(rjobs.created[0].environment["SAFACTORY_MODEL_ROUTE"]) == (
+        REAL_GATEWAY_ROUTES["kimi-k3"]
+    )
+    assert rjobs.created[0].mounts[0].source.endswith(
+        "/job_real_001/gateway"
+    )
+    assert rjobs.created[0].mounts[0].target == "/app/runtime-config"
+    assert rjobs.created[0].mounts[0].read_only is True
+    assert "/app/runtime-config/gateway.yaml" in rjobs.created[0].command[2]
     assert rjobs.created[1].command[:4] == (
         "python",
         "launcher.py",
@@ -107,6 +117,8 @@ async def _exercise_orchestrator(tmp_path: Path) -> None:
         "rjob",
     )
     assert "--agent-start-config" in rjobs.created[1].command
+    llm_model_index = rjobs.created[1].command.index("--llm-model")
+    assert rjobs.created[1].command[llm_model_index + 1] == "kimi-k3"
     assert rjobs.created[1].mounts[0].read_only is True
     assert health.urls == ["http://gateway.jobs.svc:8080/readyz"]
 
@@ -146,20 +158,18 @@ async def _exercise_orchestrator(tmp_path: Path) -> None:
 
 
 async def _exercise_gateway_failure(tmp_path: Path) -> None:
-    models, ranges = write_real_configs(tmp_path)
+    ranges = write_real_configs(tmp_path)
     initialization = load_initialization_config(write_initialization_config(tmp_path))
     settings = Settings(
-        mode="real",
         auth_config_path=tmp_path / "unused-auth.yaml",
         initialization_config_path=tmp_path / "initialization.yaml",
-        model_config_path=models,
         range_config_path=ranges,
         control_db_path=tmp_path / "control.db",
         shared_storage_root=tmp_path / "shared",
         rjob_endpoint="https://rjob.invalid",
     )
     clock = FakeClock(current=datetime(2026, 8, 22, tzinfo=UTC))
-    catalog = RealCatalog(models, ranges)
+    catalog = RealCatalog(ranges, REAL_GATEWAY_ROUTES)
     store = SQLiteControlStore(settings.control_db_path)
     rjobs = FakeRJobClient(
         snapshots={
@@ -184,10 +194,10 @@ async def _exercise_gateway_failure(tmp_path: Path) -> None:
             job_id="job_gateway_failure",
             request_id="req_test",
             owner_username="test-user",
-            model_id="model_real_001",
+            model_id="kimi-k3",
             model_checksum=catalog.model_checksum(),
             model_gateway_json=(
-                catalog.resolve_model("model_real_001").gateway.model_dump_json()
+                catalog.resolve_model("kimi-k3").gateway.model_dump_json()
             ),
             range_id="range_real_001",
             gateway_image=initialization.gateway_base_image,

@@ -5,7 +5,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import uvicorn
 from fastapi import FastAPI
@@ -15,13 +15,9 @@ from server.api.middleware import install_request_middleware
 from server.api.router import api_router
 from server.application.service import JobService
 from server.auth import BearerAuthenticator, load_auth_config
-from server.config import DEFAULT_RESULTS_ROOT, Settings
+from server.config import Settings
 from server.infrastructure.clock import Clock, SystemClock
 from server.infrastructure.identifiers import IdentifierFactory, RandomIdentifierFactory
-from server.infrastructure.mock.catalog import MockCatalog
-from server.infrastructure.mock.fixture_loader import FixtureLoadError, load_fixture
-from server.infrastructure.mock.job_repository import InMemoryJobRepository
-from server.infrastructure.mock.runtime_repository import MockRuntimeRepository
 from server.infrastructure.real.configuration import (
     RealCatalog,
     TrustedConfigError,
@@ -50,7 +46,7 @@ LOGGER = logging.getLogger("server.startup")
 
 @dataclass(frozen=True, slots=True)
 class RealDependencies:
-    """Optional deployment/test injection points for external Phase 2 services."""
+    """Optional injection points for external RJob and data-platform services."""
 
     rjobs: RJobClient | None = None
     data_platform: DataPlatformRepository | None = None
@@ -72,109 +68,68 @@ def create_app(
     authenticator = BearerAuthenticator.from_config(auth_config)
     LOGGER.info("auth_status=ready trusted_users=%s", len(auth_config.users))
 
-    orchestrator: RealJobOrchestrator | None = None
-    data_platform: DataPlatformRepository | None = None
-    if settings.mode == "mock":
-        try:
-            document = load_fixture(settings.fixture_path)
-        except FixtureLoadError:
-            document = None
-            LOGGER.error("mode=mock fixture_status=unavailable")
-        else:
-            LOGGER.info(
-                "mode=mock fixture_status=ready schema_version=%s", document.schema_version
-            )
-
-        catalog = MockCatalog(document)
-        runtime = MockRuntimeRepository(
-            document=document,
-            jobs=InMemoryJobRepository(),
-            clock=clock,
-            identifiers=identifiers,
-            retry_after_seconds=settings.retry_after_seconds,
-        )
-    else:
-        dependencies = real_dependencies or RealDependencies()
-        initialization = load_initialization_config(
-            settings.initialization_config_path
-        )
-        settings = apply_initialization_config(settings, initialization)
-        if (
-            not initialization.runtime_configured
-            and settings.results_root == DEFAULT_RESULTS_ROOT
-        ):
-            settings = replace(
-                settings,
-                results_root=settings.shared_storage_root / "results",
-                results_rjob_source=(
-                    f"{settings.shared_storage_rjob_source.rstrip('/')}/results"
-                ),
-            )
-        if initialization.placeholder:
-            LOGGER.warning("mode=real image_config=placeholder")
-        environment_root = (
-            initialization.catalog.environment_root
-            if initialization.catalog is not None
-            else settings.range_config_path.parent
-        )
-        catalog = RealCatalog(
-            settings.model_config_path,
-            settings.range_config_path,
-            environment_root,
-        )
-        store = SQLiteControlStore(settings.control_db_path)
-        files = SharedFileManager(
-            settings.shared_storage_root,
-            catalog,
-            rjob_root=settings.shared_storage_rjob_source,
-            results_root=settings.results_root,
-            results_rjob_root=settings.results_rjob_source,
-            input_target=settings.environment_mount_dir,
-            result_target=settings.results_mount_dir,
-        )
-        rjobs = dependencies.rjobs or _load_rjob_client(settings)
-        _install_database_environment(settings.database_environment_json)
-        data_platform = dependencies.data_platform or load_sdk_repository(
-            settings.data_platform_factory
-        )
-        gateway_health = dependencies.gateway_health or HttpGatewayHealthChecker(
-            settings.gateway_health_timeout_seconds,
-            settings.safactory_storage_type,
-        )
-        orchestrator = RealJobOrchestrator(
-            settings=settings,
-            initialization=initialization,
-            catalog=catalog,
-            store=store,
-            files=files,
-            rjobs=rjobs,
-            health=gateway_health,
-            clock=clock,
-        )
-        runtime = RealRuntimeRepository(
-            catalog=catalog,
-            store=store,
-            data=data_platform,
-            clock=clock,
-            identifiers=identifiers,
-            gateway_image=initialization.gateway_base_image,
-            safactory_image=initialization.safactory_base_image,
-            retry_after_seconds=settings.retry_after_seconds,
-            wake_orchestrator=orchestrator.wake,
-        )
+    dependencies = real_dependencies or RealDependencies()
+    initialization = load_initialization_config(settings.initialization_config_path)
+    settings = apply_initialization_config(settings, initialization)
+    catalog = RealCatalog(
+        settings.range_config_path,
+        initialization.gateway.config["llm_routes"],
+        initialization.catalog.environment_root,
+    )
+    store = SQLiteControlStore(settings.control_db_path)
+    files = SharedFileManager(
+        settings.shared_storage_root,
+        catalog,
+        rjob_root=settings.shared_storage_rjob_source,
+        results_root=settings.results_root,
+        results_rjob_root=settings.results_rjob_source,
+        input_target=settings.environment_mount_dir,
+        result_target=settings.results_mount_dir,
+        gateway_config=initialization.gateway.config,
+        gateway_config_mount_dir=settings.gateway_config_mount_dir,
+        gateway_config_filename=settings.gateway_config_filename,
+    )
+    rjobs = dependencies.rjobs or _load_rjob_client(settings)
+    _install_database_environment(settings.database_environment_json)
+    data_platform = dependencies.data_platform or load_sdk_repository(
+        settings.data_platform_factory
+    )
+    gateway_health = dependencies.gateway_health or HttpGatewayHealthChecker(
+        settings.gateway_health_timeout_seconds,
+        settings.safactory_storage_type,
+    )
+    orchestrator = RealJobOrchestrator(
+        settings=settings,
+        initialization=initialization,
+        catalog=catalog,
+        store=store,
+        files=files,
+        rjobs=rjobs,
+        health=gateway_health,
+        clock=clock,
+    )
+    runtime = RealRuntimeRepository(
+        catalog=catalog,
+        store=store,
+        data=data_platform,
+        clock=clock,
+        identifiers=identifiers,
+        gateway_image=initialization.gateway_base_image,
+        safactory_image=initialization.safactory_base_image,
+        retry_after_seconds=settings.retry_after_seconds,
+        wake_orchestrator=orchestrator.wake,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        if orchestrator is not None and data_platform is not None:
-            await orchestrator.preflight()
-            await data_platform.preflight()
-            await orchestrator.start()
-            LOGGER.info("mode=real dependency_status=ready")
+        await orchestrator.preflight()
+        await data_platform.preflight()
+        await orchestrator.start()
+        LOGGER.info("dependency_status=ready")
         try:
             yield
         finally:
-            if orchestrator is not None:
-                await orchestrator.stop()
+            await orchestrator.stop()
 
     application = FastAPI(
         title="Safactory Job API",
@@ -185,9 +140,8 @@ def create_app(
     )
     application.state.job_service = JobService(catalog, runtime)
     application.state.orchestrator = orchestrator
-    if settings.mode == "real":
-        application.state.control_store = store
-        application.state.initialization_config = initialization
+    application.state.control_store = store
+    application.state.initialization_config = initialization
     install_error_handlers(application)
     install_request_middleware(application, identifiers, authenticator)
     application.include_router(api_router)
@@ -234,13 +188,10 @@ def _install_database_environment(raw: str) -> None:
         os.environ[key] = value
 
 
-app = create_app()
-
-
 def run() -> None:
     settings = Settings.from_env()
     uvicorn.run(
-        app,
+        create_app(settings),
         host=settings.host,
         port=settings.port,
         workers=1,

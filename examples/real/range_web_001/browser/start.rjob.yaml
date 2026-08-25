@@ -6,4 +6,4 @@ container:
     command: python /app/runner.py
 rjob:
   mount_config:
-    - shared-results-placeholder:/app/results
+    - managed-results:/app/results

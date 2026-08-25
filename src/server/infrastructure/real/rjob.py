@@ -46,8 +46,10 @@ class RJobSpec:
     working_dir: str = "/app"
     mounts: tuple[MountSpec, ...] = ()
     resources: dict[str, Any] = field(default_factory=dict)
+    requests: dict[str, Any] = field(default_factory=dict)
     timeout_seconds: int = 3600
     daemon: bool = False
+    restart_policy: str = "Never"
     private_machine: str | None = "Group"
     host_network: bool | None = None
     auto_delete_duration: str | None = "12h"
@@ -238,6 +240,7 @@ class BrainPPRJobClient:
     def _build_job(self, spec: RJobSpec) -> Any:
         symbols = self._symbols
         resources = _resources_struct(symbols, spec.resources)
+        requests = _resources_struct(symbols, spec.requests)
         image_pull_policy = _coerce_enum(
             symbols.get("ImagePullPolicy"), spec.image_pull_policy
         )
@@ -250,6 +253,8 @@ class BrainPPRJobClient:
         }
         if resources is not None:
             container_kwargs["resources"] = resources
+        if requests is not None:
+            container_kwargs["requests"] = requests
         if image_pull_policy is not None:
             container_kwargs["image_pull_policy"] = image_pull_policy
         container = _make_struct(symbols["Container"], **container_kwargs)
@@ -264,7 +269,9 @@ class BrainPPRJobClient:
             "template": template,
             "daemon": spec.daemon,
         }
-        restart_policy = _coerce_enum(symbols.get("RestartPolicy"), "Never")
+        restart_policy = _coerce_enum(
+            symbols.get("RestartPolicy"), spec.restart_policy
+        )
         if restart_policy is not None:
             task_kwargs["restart_policy"] = restart_policy
         private_machine = _coerce_enum(

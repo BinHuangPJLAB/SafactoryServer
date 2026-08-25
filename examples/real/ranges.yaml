@@ -1,11 +1,19 @@
 schema_version: "1.0"
 ranges:
-  - range_id: range_harbor_smoke_001
+  - range_id: range_cyberrange_smoke_001
     available: true
     availability_retryable: false
-    supported_models: [model_glm_001]
-    agent_config: harbor/harbor_cvebench_config.rjob.yaml
+    agent_config: cyberrange/cyberrange_config.smoke.rjob.yaml
     groups:
-      - env_name: harbor
-        dataset: harbor/datasets/harbor_cvebench_smoke.jsonl
-        start_config: harbor/harbor_cvebench_start.rjob.yaml
+      - env_name: cyberrange
+        dataset: cyberrange/datasets/cyberrange_smoke.jsonl
+        start_config: cyberrange/cyberrange_start.rjob.yaml
+
+  - range_id: range_cyberrange_full_001
+    available: true
+    availability_retryable: false
+    agent_config: cyberrange/cyberrange_config.rjob.yaml
+    groups:
+      - env_name: cyberrange
+        dataset: cyberrange/datasets/cyberrange_cases.jsonl
+        start_config: cyberrange/cyberrange_start.rjob.yaml

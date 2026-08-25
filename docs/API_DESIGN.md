@@ -26,7 +26,7 @@
 - 一个 Job 只运行一个靶场；
 - 当前靶场为单页面、单拓扑，一个 Job 可对应一个或多个 Session；
 - `range_id` 由基座提供，其值必须与工程中心保存的靶场模板 ID 对齐；
-- 模型信息统一来自服务端模型 YAML，模型查询接口只公开 `model_id` 和 `name`；
+- 模型信息来自 `initialization.yaml` 中 `gateway.config.llm_routes`；route 名称直接作为 `model_id` 和 `name` 返回；
 - `model_id` 必须来自模型查询接口，且创建 Job 时仍处于可用状态；
 - ID 均为不透明字符串，调用方不得解析或自行拼接 ID；
 - 创建 Job 后的所有查询都必须携带 `job_id`，服务端必须校验 Session、Step 与 Job 的归属关系；
@@ -89,7 +89,7 @@ sequenceDiagram
     "code": "MODEL_NOT_AVAILABLE",
     "message": "The selected model is not available.",
     "details": {
-      "model_id": "model_glm_001"
+      "model_id": "kimi-k3"
     },
     "retryable": false
   },
@@ -116,9 +116,11 @@ sequenceDiagram
 
 ### `GET /v1/models`
 
-创建 Job 前必须先调用此接口。服务端从统一的模型 YAML 配置文件读取模型信息，接口只返回当前允许用于新 Job 的模型。
+创建 Job 前必须先调用此接口。真实模式直接读取统一初始化 YAML 的
+`gateway.config.llm_routes`，每个 route 的键就是可用于新 Job 的模型 ID。
 
-每个模型条目只能返回 `model_id` 和 `name`。YAML 中的模型路由、地址、鉴权引用、可用性配置及其他内部字段不得出现在响应中。
+每个模型条目只返回 `model_id` 和 `name`，两者都等于 route 名称。route 的
+`base_url`、`api_key` 和其他内部字段不得出现在响应中。
 
 ### Response
 
@@ -130,12 +132,12 @@ HTTP/1.1 200 OK
 {
   "items": [
     {
-      "model_id": "model_glm_001",
-      "name": "GLM Route"
+      "model_id": "kimi-k3",
+      "name": "kimi-k3"
     },
     {
-      "model_id": "model_qwen_001",
-      "name": "Qwen Route"
+      "model_id": "qwen-max",
+      "name": "qwen-max"
     }
   ]
 }
@@ -151,10 +153,10 @@ HTTP/1.1 200 OK
 
 约束：
 
-- 模型 YAML 中的 `model_id` 必须唯一，`model_id` 和 `name` 均不能为空；
-- 接口只返回 YAML 中配置为可用于新 Job 的模型；
-- 模型 YAML 不存在、无法读取或校验失败时，返回 `503 DEPENDENCY_UNAVAILABLE`；
-- 模型列表可能发生变化。创建 Job 时，服务端必须从同一模型配置源再次校验 `model_id` 是否可用。
+- `llm_routes` 的 route 名称必须非空且天然唯一；
+- 接口返回 `llm_routes` 中的全部 route 名称，不返回 route value；
+- Gateway config 缺失、为空或校验失败时，真实模式拒绝启动；
+- 模型列表可能发生变化。创建 Job 时，服务端必须从同一 `llm_routes` 再次校验 `model_id`。
 
 ## 5. 创建 Job
 
@@ -166,7 +168,7 @@ HTTP/1.1 200 OK
 
 ```json
 {
-  "model_id": "model_glm_001",
+  "model_id": "kimi-k3",
   "range_id": "range_web_001"
 }
 ```
@@ -182,7 +184,7 @@ HTTP/1.1 200 OK
 
 - `model_id` 存在且当前可用；
 - `range_id` 能在工程中心唯一匹配一个可用的靶场模板；
-- 该模型允许用于所选靶场。
+- 模型和 Range 分别校验，不维护或检查模型与 Range 的组合白名单。
 
 ### Response
 
@@ -195,7 +197,7 @@ Location: /v1/jobs/sessions?job_id=job_01K2XYZ...
 {
   "job_id": "job_01K2XYZ...",
   "status": "queued",
-  "model_id": "model_glm_001",
+  "model_id": "kimi-k3",
   "range_id": "range_web_001",
   "created_at": "2026-08-17T08:00:00Z"
 }
@@ -211,7 +213,6 @@ Location: /v1/jobs/sessions?job_id=job_01K2XYZ...
 | `MODEL_NOT_AVAILABLE` | 422 | 模型当前不可用于新 Job |
 | `RANGE_NOT_FOUND` | 422 | `range_id` 无法匹配工程中心靶场模板 |
 | `RANGE_NOT_AVAILABLE` | 422 | 靶场模板当前不可用 |
-| `MODEL_RANGE_NOT_SUPPORTED` | 422 | 所选模型不支持该靶场 |
 | `DEPENDENCY_UNAVAILABLE` | 503 | 模型配置、工程中心或执行依赖暂不可用 |
 
 ## 6. 使用 Job ID 查询 Session ID 列表
@@ -481,7 +482,6 @@ HTTP/1.1 200 OK
 | `MODEL_NOT_AVAILABLE` | 422 | 否 | 模型当前不可用 |
 | `RANGE_NOT_FOUND` | 422 | 否 | 靶场 ID 无法匹配工程中心模板 |
 | `RANGE_NOT_AVAILABLE` | 422 | 视情况 | 靶场模板当前不可用 |
-| `MODEL_RANGE_NOT_SUPPORTED` | 422 | 否 | 模型与靶场组合不受支持 |
 | `JOB_NOT_FOUND` | 404 | 否 | Job 不存在 |
 | `SESSION_NOT_FOUND` | 404 | 否 | Session 不存在或不属于指定 Job |
 | `STEP_NOT_FOUND` | 404 | 否 | Step 不存在或不属于指定 Session |

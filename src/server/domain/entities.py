@@ -33,7 +33,6 @@ class Range:
     range_id: str
     available: bool
     availability_retryable: bool
-    supported_model_ids: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)

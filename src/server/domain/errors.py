@@ -12,7 +12,6 @@ class ErrorCode(StrEnum):
     MODEL_NOT_AVAILABLE = "MODEL_NOT_AVAILABLE"
     RANGE_NOT_FOUND = "RANGE_NOT_FOUND"
     RANGE_NOT_AVAILABLE = "RANGE_NOT_AVAILABLE"
-    MODEL_RANGE_NOT_SUPPORTED = "MODEL_RANGE_NOT_SUPPORTED"
     JOB_NOT_FOUND = "JOB_NOT_FOUND"
     SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     STEP_NOT_FOUND = "STEP_NOT_FOUND"
@@ -39,9 +38,6 @@ ERROR_SPECS = {
     ErrorCode.RANGE_NOT_FOUND: ErrorSpec(422, "The selected range does not exist.", False),
     ErrorCode.RANGE_NOT_AVAILABLE: ErrorSpec(
         422, "The selected range is not available.", False
-    ),
-    ErrorCode.MODEL_RANGE_NOT_SUPPORTED: ErrorSpec(
-        422, "The selected model does not support this range.", False
     ),
     ErrorCode.JOB_NOT_FOUND: ErrorSpec(404, "The specified job does not exist.", False),
     ErrorCode.SESSION_NOT_FOUND: ErrorSpec(

@@ -1,6 +1,6 @@
 # 真实 RJob 调度部署说明
 
-真实模式保留公开 API 不变。`POST /v1/jobs` 只负责持久化并返回 `202`，后台编排器实际执行：
+`POST /v1/jobs` 只负责持久化并返回 `202`，后台编排器实际执行：
 
 ```text
 生成 Job env 快照和 results 目录
@@ -23,7 +23,6 @@ IP bootstrap、daemon 设置和 Safactory 的 launcher 参数与 Safactory 仓�
 复制 [`examples/real/initialization.yaml`](../examples/real/initialization.yaml) 作为部署配置，并通过：
 
 ```bash
-export SAFACTORY_MODE=real
 export SAFACTORY_INITIALIZATION_CONFIG_PATH=/absolute/path/initialization.yaml
 ```
 
@@ -33,13 +32,18 @@ export SAFACTORY_INITIALIZATION_CONFIG_PATH=/absolute/path/initialization.yaml
 - `rjob`：`brainpp.rjob` cluster entry、namespace、charged group、AK/SK 及生命周期参数；
 - `storage.environment`：Server 写入 Job env 快照的本地共享盘路径、对应 RJob source 和 `/app/env` target；
 - `storage.results`：results 本地共享盘路径、对应 RJob source 和 `/app/results` target；
-- `catalog`：models、ranges 和 Server 自管环境目录；
-- `gateway`：Gateway YAML mount、端口、健康检查、资源和超时；
+- `catalog`：ranges 和 Server 自管环境目录；模型直接来自 `gateway.config.llm_routes`；
+- `gateway`：完整 Gateway `config`、生成后的 mount、端口、健康检查、资源/request 和超时；
 - `safactory`：launcher、并发、step、episode RJob 默认值、资源和超时。
 
-`${NAME}` 会在 Server 启动时从环境变量展开；变量缺失会直接拒绝启动。AK/SK、S3
-凭据和模型密钥不要写入 Git。Gateway YAML 本身应由部署流程同步到
-`gateway.config_source_dir` 指向的集群共享目录。
+`${NAME}` 会在 Server 启动时从环境变量展开；变量缺失会直接拒绝启动；
+`${NAME:-default}` 可声明默认值。AK/SK、S3 凭据和模型密钥不要写入 Git。
+
+不再维护独立的 Gateway 配置文件。`gateway.config` 就是 Gateway 的完整业务配置；Server
+在创建 Job 时将它渲染为 `<environment.local_path>/<job_id>/gateway/gateway.yaml`，再通过
+对应的 `environment.rjob_source` 只读挂载到 Gateway RJob 的
+`gateway.config_mount_dir/gateway.config_filename`。因此 DB、RJob、Gateway 与镜像只有一份
+初始化 YAML，不需要额外同步 `gateway.yaml`。
 
 ## env 与 results 映射
 
@@ -72,6 +76,7 @@ Server 在 `environment.local_path/<job_id>` 原子发布不可变快照；RJob 
 当前已验证的 launcher CLI 每个 Job 只接收一个 `--agent-start-config`，所以一个 range
 暂时只允许一个 environment group。创建 Job 时会校验：
 
+- `model_id` 只从请求参数取得并在 `gateway.config.llm_routes` 中校验，Range 不限制模型；
 - agent config 的 `environments[]` 与 range 的 `env_name` 一致；
 - dataset 非空且每行是 JSON object；
 - start config 的 `agent_name`、`runner_entrypoint` 和 results mount 有效；
@@ -96,17 +101,17 @@ Server 重启后按已保存的 RJob 名称继续轮询。终态清理顺序为 
 
 ## 启动检查
 
-真实模式 startup 会检查：
+服务 startup 会检查：
 
 1. 初始化 YAML 和所有 `${VAR}`；
-2. models/ranges/env 文件；
+2. `gateway.config.llm_routes`、ranges 和 env 文件；
 3. env staging 与 results 本地共享路径可写；
-4. Gateway 本地 YAML 存在；
+4. 内联 Gateway config、端口/session path 和 storage type 相互一致；
 5. Cloud DB 必需环境完整且 URI 合法；
 6. `brainpp.rjob` 可连接；
 7. `wt-data-platform-sdk` client 可初始化。
 
-任一项失败都不会退回 Mock。建议先运行：
+任一项失败都会拒绝启动。建议先运行：
 
 ```bash
 .venv/bin/ruff check src tests

@@ -38,10 +38,10 @@ Safactory 基于 YAML 的 `environments` 配置和 dataset 文件展开任务分
 
 ### 3.1 MVP 目标
 
-以下为完整 MVP 的最终目标，并在 Roadmap Phase 2 完成。Phase 1 只实现同一套公开 API 的 Mock Server，用于接口联调，不创建 RJob，也不访问真实数据平台。
+以下为当前真实调度 MVP 的目标。
 
 1. 部署一个 Safactory Job Server，实现 [API_DESIGN.md](./API_DESIGN.md) 定义的所有接口。
-2. 使用一个服务端 YAML 文件统一管理模型信息；`GET /v1/models` 只返回 `model_id` 和 `name`。
+2. 使用初始化 YAML 的 `gateway.config.llm_routes` 统一管理模型；route 名称直接作为 `GET /v1/models` 的 `model_id` 和 `name`。
 3. 使用 `model_id + range_id` 创建异步 Job，并立即返回 `202 Accepted` 和 `job_id`。
 4. Job 调度统一通过 RJob 平台完成：Server 负责两个顶层 RJob，Safactory controller 负责下游 episode RJob。
 5. 提供可被 RJob 拉取的 Gateway base image 和 Safactory base image，并记录实际使用的不可变版本或 digest。
@@ -57,16 +57,14 @@ Safactory 基于 YAML 的 `environments` 配置和 dataset 文件展开任务分
 
 - 公开 API 范围为 [API_DESIGN.md](./API_DESIGN.md) 定义的六个接口；
 - Job 停止仅供超时策略和运维内部使用；
-- 模型 YAML、Safactory YAML/JSONL、image、运行命令、输入/结果 mount 和凭据由服务端受信任配置提供；
+- Gateway routes、Safactory YAML/JSONL、image、运行命令、输入/结果 mount 和凭据由服务端受信任配置提供；
 - 暂停恢复、Session/step 级重试和手动停止不在 MVP 范围内。
 
-### 3.3 分阶段交付原则
+### 3.3 交付原则
 
-- Phase 1 和 Phase 2 必须使用同一份 [API_DESIGN.md](./API_DESIGN.md) 契约；路径、请求字段、响应字段、HTTP 状态码和稳定错误码不得因数据来源不同而变化；
-- Phase 1 使用本地 Mock 实现，仅用于接口调用、前后端联调和契约测试，不表示真实 Job 已被调度；
-- Phase 2 保留 Phase 1 的 API 层，替换 Job 调度和运行数据适配器，接入真实 RJob、image、mount 和 `wt-data-platform-sdk`；
-- Mock 和真实实现必须通过明确的部署配置切换。真实模式依赖异常时不得静默回退 Mock 数据，以免把伪造结果当作真实结果；
-- 每个阶段必须通过本阶段验收门槛后才能进入下一阶段。
+- 服务只保留真实 RJob、image、mount 和 `wt-data-platform-sdk` 链路；
+- 依赖启动检查失败时直接拒绝启动，运行中查询失败时返回稳定依赖错误；
+- 契约测试复用同一 API handler/schema，并通过测试替身隔离外部 RJob 与数据平台服务。
 
 ## 4. 用户角色与核心场景
 
@@ -83,7 +81,7 @@ Safactory 基于 YAML 的 `environments` 配置和 dataset 文件展开任务分
 
 ### 4.2 正常执行流程
 
-1. Server 从统一模型 YAML 中读取可用模型；调用方通过 `GET /v1/models` 取得 `model_id` 和模型名称，并持有基座提供的 `range_id`。
+1. Server 从 `gateway.config.llm_routes` 读取模型名称并直接作为 `model_id/name`；调用方通过 `GET /v1/models` 取得该 ID，并持有基座提供的 `range_id`。
 2. 调用方通过 `POST /v1/jobs` 提交 `model_id + range_id`。
 3. Server 校验模型、靶场和文件模板，生成唯一 `job_id`，持久化 `queued` Job 并返回 `202 Accepted`。
 4. 后台编排器领取 Job，根据 `range_id` 解析按 `environments` 分组的 YAML 和各组 `dataset.jsonl`，为该 `job_id` 发布不可变输入绑定并分配共享结果目录。
@@ -216,29 +214,29 @@ flowchart LR
 - episode worker 和 Safactory controller 必须 mount 同一结果存储：worker 可写，controller 可读；结果文件在 controller 成功读取和持久化前不得清理。
 - Server 通过 `wt-data-platform-sdk` 公共接口查询运行数据。
 
-## 7. 模型配置管理
+## 7. Gateway route 与模型管理
 
-### 7.1 模型 YAML
+### 7.1 唯一模型来源
 
-所有模型信息统一保存在一个服务端 YAML 文件中。该文件由运维配置管理，不通过公开 API 修改。
+真实模式不维护独立 `models.yaml`。所有模型统一来自初始化 YAML 的
+`gateway.config.llm_routes`，由运维配置管理，不通过公开 API 修改。
 
-每个模型配置至少包含：
+每个 `llm_routes` 条目至少包含：
 
-- 全局唯一且非空的 `model_id`；
-- 非空的模型名称 `name`；
-- 是否可用于创建新 Job 的状态；
-- Gateway 启动所需的模型路由及内部配置。
+- 全局唯一且非空的 route 名称，该名称同时作为 `model_id` 和展示 `name`；
+- Gateway 启动所需的 route value，例如服务地址、鉴权和并发配置。
 
 模型路由、服务地址、鉴权引用及其他内部配置仅用于 Server 校验 Job 和生成 Gateway RJob 配置。
 
 ### 7.2 `GET /v1/models` 返回约束
 
-- Server 从模型 YAML 读取当前可用于新 Job 的模型；
-- 每个响应条目只能包含 `model_id` 和 `name`；
-- 响应不得包含模型路由、服务地址、鉴权引用、可用性配置或其他 YAML 字段；
-- YAML 文件不存在、不可读、格式错误、`model_id` 重复或必要字段缺失时，模型配置不可用；
-- `POST /v1/jobs` 必须从同一模型 YAML 再次校验 `model_id`，并使用对应内部配置创建 Gateway RJob；
-- Server 应记录已加载模型 YAML 的版本或 checksum，Job 记录保存创建时使用的配置版本。
+- Server 枚举 `gateway.config.llm_routes` 的键；
+- 每个响应条目只包含 `model_id` 和 `name`，两者均等于 route 名称；
+- 响应不得包含 route value、服务地址、鉴权或其他内部字段；
+- `llm_routes` 缺失、为空、route 名称为空或 route value 非对象时，初始化配置无效；
+- `POST /v1/jobs` 必须从同一 `llm_routes` 再次校验 `model_id`；
+- Range 配置不得维护模型白名单；任意有效 route 均可与任意有效 Range 组合；
+- Server 应记录创建时所用 `llm_routes` 的 checksum。
 
 ## 8. Base image 与 RJob 规范
 
@@ -251,13 +249,15 @@ flowchart LR
 | `gateway_base_image` | Gateway worker 使用的 registry image，生产环境应固定 digest |
 | `safactory_base_image` | Safactory controller 使用的 registry image，生产环境应固定 digest |
 | `image_pull_policy` | RJob 拉取策略 |
-| `gateway_resources` | Gateway 的 CPU、内存及其他资源 |
-| `safactory_resources` | Safactory controller 的 CPU、内存、GPU 及其他资源 |
-| `episode_rjob_defaults` | 下游 episode RJob 的资源、超时、重试和保留策略 |
-| `rjob_namespace` | 工作负载所在 namespace |
-| `charged_group` | RJob 配额或计费组 |
+| `database` | Control DB、数据平台 factory、Gateway/launcher 共用的 Cloud DB/S3 环境 |
+| `rjob` | cluster、namespace、charged group、认证、restart、网络和生命周期参数 |
+| `storage.environment/results` | Server 本地共享盘、RJob source 和容器 mount 的对应关系 |
+| `gateway.config` | Gateway 完整业务配置；由 Server 按 Job 生成并只读挂载 |
+| `gateway.resources/requests` | Gateway 的 CPU、内存及其他资源 limit/request |
+| `safactory.resources/requests` | Safactory controller 的 CPU、内存、GPU 及其他资源 limit/request |
+| `safactory.episode_rjob_defaults` | 下游 episode RJob 的资源、超时、重试和保留策略 |
 
-Gateway 与 Safactory 的 image 必须集中写入同一份服务端初始化 YAML，不接受调用方字段或独立环境变量覆盖。真实 image 尚未提供时可在该 YAML 中使用明确标记的 Mock placeholder，但不得据此伪造 RJob 或 Job 成功。Image 和资源配置由服务端管理。Server 必须在 Job 记录中保存两个顶层工作负载实际使用的 image 引用；episode image 版本由 Safactory controller 的运行摘要关联记录。
+Gateway 与 Safactory 的 image、DB、顶层 RJob 参数、共享目录和 Gateway config 必须集中写入同一份服务端初始化 YAML，不接受调用方字段覆盖，也不接受占位 image。Image 和资源配置由服务端管理。Server 必须在 Job 记录中保存两个顶层工作负载实际使用的 image 引用；episode image 版本由 Safactory controller 的运行摘要关联记录。
 
 ### 8.2 Gateway RJob 提交
 
@@ -326,7 +326,8 @@ Safactory controller 为每次 episode 创建一个下游 RJob，至少包含：
 4. 必要时渲染 Job 专属 agent/start config YAML，使各组 dataset 路径、结果根目录和下游 `rjob.mount_config` 指向容器内实际 mount；
 5. 将输入文件和结果目录发布到 RJob 集群可访问的共享存储；
 6. 返回输入/结果 mount source、不同容器内的 target、文件版本和 checksum；
-7. 提供按 `job_id` 查询输入绑定、环境组和结果目录的内部能力，供重启恢复和审计使用。
+7. 从初始化 YAML 的 `gateway.config` 生成 Job 专属 `gateway.yaml`，并返回其 mount source、target 和 checksum；
+8. 提供按 `job_id` 查询输入绑定、环境组和结果目录的内部能力，供重启恢复和审计使用。
 
 ### 9.2 `environments` 分组与 start config 配对
 
@@ -615,8 +616,8 @@ sequenceDiagram
 ### FR-01 API Server
 
 - Server 实现 API 文档定义的模型、创建 Job、Session、结果、step 和 trajectory 接口；
-- `GET /v1/models` 从统一模型 YAML 读取数据，每个模型只返回 `model_id` 和 `name`；
-- `POST /v1/jobs` 使用同一模型 YAML 校验 `model_id` 并解析 Gateway 内部配置；
+- `GET /v1/models` 枚举 `gateway.config.llm_routes`，route 名称作为 `model_id/name`；
+- `POST /v1/jobs` 使用同一 `llm_routes` 校验 `model_id` 并解析 Gateway route；
 - 创建接口只持久化并排队，不同步等待两个顶层 RJob 启动；
 - API 进程不得执行 Safactory 或 Gateway 业务代码；
 - 所有响应和错误码遵循 API 文档。
@@ -699,7 +700,7 @@ sequenceDiagram
 ### 15.3 安全
 
 - RJob AK/SK、registry 凭据、模型密钥和数据平台 SDK 凭据只由 Server/部署环境管理；Safactory controller 仅获得提交当前 Job 下游 RJob 所需的最小权限；
-- 模型 YAML 的内部字段不得通过 `GET /v1/models`、日志或错误响应暴露；
+- Gateway route value 不得通过 `GET /v1/models`、日志或错误响应暴露；
 - 调用方只能提交 `model_id + range_id`，不能覆盖 image、命令、mount 或凭据；
 - agent/start config、文件模板和输入/结果 mount source 必须来自受信任配置；
 - Gateway 地址只用于内部编排，不在公开 API 中返回；
@@ -725,7 +726,7 @@ sequenceDiagram
 
 | 类别 | 典型错误 | 处理原则 |
 |---|---|---|
-| 请求与元数据 | 模型不存在、靶场不存在、组合不支持 | 创建失败，不进入调度。 |
+| 请求与元数据 | 模型不存在或靶场不存在 | 创建失败，不进入调度；有效模型与有效靶场可任意组合。 |
 | 模型配置 | YAML 不存在、不可读、格式错误、ID 重复、必要字段缺失 | 模型接口返回依赖错误；不创建 Job。 |
 | 文件管理 | agent/start YAML 或 JSONL 不存在、分组/配对错误、版本不匹配、输入 mount 不可用 | 不创建 Gateway RJob，Job 失败。 |
 | RJob 平台 | 鉴权失败、配额不足、提交失败、状态查询失败 | 有限重试；无法恢复时 Job 失败。 |
@@ -740,13 +741,13 @@ sequenceDiagram
 
 ## 17. MVP 验收标准
 
-本节描述 Phase 2 完成后的真实链路验收。Phase 1 的 Mock Server 验收以第 18.1 节为准。
+本节描述真实链路验收。
 
 ### 17.1 API 与异步创建
 
 - 六个 API 均由同一个 Server 提供；
-- `GET /v1/models` 的数据来自统一模型 YAML，响应条目严格只包含 `model_id` 和 `name`；
-- 模型 YAML 中的路由、地址、鉴权引用和其他内部字段不会出现在 API 响应中；
+- `GET /v1/models` 的数据来自 `gateway.config.llm_routes`，route 名称直接作为 `model_id/name`；
+- route value 中的地址、鉴权和其他内部字段不会出现在 API 响应中；
 - 使用有效 `model_id + range_id` 创建 Job，立即返回 `202` 和唯一 `job_id`；
 - HTTP 请求结束后由后台编排器继续执行，不阻塞调用方；
 - 无效模型、靶场或文件模板不会创建 RJob。
@@ -797,129 +798,20 @@ sequenceDiagram
 - Safactory controller 重试或恢复时不会重复创建同一 episode；
 - 清理始终按 episode RJob、Safactory controller、Gateway 的顺序执行，并可重复执行。
 
-## 18. Roadmap
+## 18. 当前交付
 
-Roadmap 分为两个连续阶段。Phase 1 交付可独立启动和联调的 Mock API Server；Phase 2 在不改变公开 API 契约的前提下，接入给定的 Gateway/Safactory image，完成真实 Job 创建、运行和查询闭环。
+当前版本只交付真实 Job Flow：
 
-| 阶段 | 核心结果 | 外部依赖 | 完成标志 |
-|---|---|---|---|
-| Phase 1：Mock API Server | 六个 API 可按契约调用，返回稳定 Mock 数据和错误响应 | 无 RJob、image、共享存储和数据平台依赖 | API 契约测试和完整 Mock happy path 通过 |
-| Phase 2：真实 Job Flow | 使用真实 image 创建 Gateway 与 Safactory controller，并完成 episode、结果回收和 SDK 查询 | RJob、images、模型配置、共享存储、SDK | 一个真实 Job 从创建到结果查询的 E2E 通过 |
-
-### 18.1 Phase 1：Mock API Server
-
-#### 阶段目标
-
-只搭建一个可独立运行的 Job Server，优先完成 API 调用调试和上下游联调。Server 不调用 RJob 平台、不启动任何 image、不 mount 文件，也不访问 `wt-data-platform-sdk`；所有业务数据来自本地 Mock 数据集。
-
-#### 实现范围
-
-1. 建立统一 HTTP Server、请求校验、响应序列化、错误映射、`request_id` 和基础日志。
-2. 完整实现 API 文档中的六个接口：
-   - `GET /v1/models`；
-   - `POST /v1/jobs`；
-   - `GET /v1/jobs/sessions`；
-   - `GET /v1/sessions/result`；
-   - `GET /v1/sessions/steps`；
-   - `GET /v1/sessions/steps/trajectory`。
-3. 使用一个版本化的本地 Mock 数据文件保存模型、`range_id` 场景、Session、result、step 和 trajectory；文件随 Server 一起部署。
-4. `POST /v1/jobs` 仍须校验 `model_id + range_id`、生成唯一 `job_id` 并返回约定的 `202 Accepted`。Server 在内存中建立 `job_id → Mock 场景` 映射，后续查询必须使用本次生成的 `job_id/session_id` 关联数据。
-5. Mock 状态需要覆盖最小异步语义：刚创建时 Session 可为空、result 可处于未完成状态，随后按配置的短延迟进入可查询/完成状态；不得新增公开 API 参数来控制 Mock 状态。
-6. 所有成功和失败响应必须严格匹配 API 文档，不得增加 `mock`、内部状态或调试专用响应字段。
-7. 至少提供一组完整 happy-path fixture，以及模型不存在、range 不存在、Job 不存在、Session 不存在、step 不存在和请求字段非法等错误 fixture。
-
-Phase 1 不要求 Job 在 Server 重启后继续存在。若联调环境需要稳定复现，可在启动时重新加载同一 Mock fixture；不得为此引入外部数据库或其他服务。
-
-#### Mock 数据行为
-
-| API | Phase 1 行为 |
-|---|---|
-| `GET /v1/models` | 从模型 Mock/YAML 读取，只返回 `model_id` 和 `name`。 |
-| `POST /v1/jobs` | 校验模型和 `range_id`，生成唯一 `job_id`，绑定对应 Mock 场景并返回 `202`。 |
-| `GET /v1/jobs/sessions` | 按生成的 `job_id` 返回空列表或该场景的 Session ID 列表。 |
-| `GET /v1/sessions/result` | 按 Mock 时间线返回“未完成”或最终 result/reward。 |
-| `GET /v1/sessions/steps` | 返回该 Session 的固定 step 列表及约定字段。 |
-| `GET /v1/sessions/steps/trajectory` | 返回指定 `session_id + step_id` 的固定 trajectory。 |
-
-#### 交付物
-
-- 可独立启动的 Job Server；
-- 版本化 Mock 数据文件和加载器；
-- 环境配置示例，默认显式启用 `mock` 模式；
-- 覆盖六个接口的自动化契约测试；
-- 一份可直接执行的 curl/HTTP 联调示例；
-- Mock 数据字段与 API 响应字段的映射说明。
-
-#### 验收与退出条件
-
-- Server 在没有 RJob、Gateway、Safactory、共享存储和数据平台的环境中可以启动；
-- 六个接口的路径、参数、响应结构、HTTP 状态码和稳定错误码均与 API 文档一致；
-- 可以完成“查询模型 → 创建 Job → 查询 Session → 查询 result → 查询 steps → 查询 trajectory”的 Mock 闭环；
-- 同一 Mock Job 的 `job_id/session_id/step_id` 关联一致，不返回其他 Job 的数据；
-- 空列表、结果未完成和主要错误场景可重复验证；
-- 自动化契约测试全部通过后，Phase 1 完成。
-
-### 18.2 Phase 2：真实 Job 创建与运行 Flow
-
-#### 阶段目标
-
-保留 Phase 1 已验证的 API 层，将 Mock Job 调度和 Mock 查询替换为真实实现。Server 使用给定的 Gateway image 和 Safactory image 创建两个顶层 RJob，Safactory controller 再根据分组配置创建 episode RJob，最终通过 `wt-data-platform-sdk` 返回真实数据。
-
-#### 启动前依赖
-
-- 可被 RJob 集群拉取的 Gateway/Safactory image 引用，生产式联调应固定 tag 或 digest；
-- RJob endpoint、namespace、charged group、最小权限凭据和资源配额；
-- 服务端模型 YAML 及 Gateway 所需内部模型路由；
-- `range_id` 对应的 agent config YAML、分组 `dataset.jsonl`、agent start config YAML 和 episode 环境 image；
-- controller 与 episode worker 均可访问的共享输入/结果存储及 `mount_config`；
-- 可用的 `wt-data-platform-sdk` 配置和共享数据表。
-
-以上依赖缺失时 Phase 2 不得伪装成功，也不得回退 Phase 1 Mock 数据。
-
-#### 实施里程碑
-
-| 里程碑 | 工作内容 | 验证结果 |
-|---|---|---|
-| P2.1 真实配置与适配层 | 接入模型 YAML、Job 持久化、RJob Client、文件绑定和 SDK repository；保留 API handler 不变 | Server 可在真实模式启动并完成依赖预检 |
-| P2.2 Gateway RJob | 使用给定 Gateway image 创建 RJob，轮询状态，发现集群地址并完成 health check | 能取得 episode worker 可访问的 Gateway URL |
-| P2.3 Safactory controller RJob | Gateway ready 后使用给定 Safactory image 创建 controller，注入输入/结果 mount 和 Gateway URL | 两个顶层 RJob 顺序正确，controller 能读取分组输入 |
-| P2.4 episode 与结果回收 | controller 按 `environments`、dataset 和 `env_num` 创建 episode RJob；worker 写结果，controller 从共享 mount 读取 | 至少一个真实 episode 产生并回收有效 `SimulationStartResult` |
-| P2.5 数据查询闭环 | Gateway/controller 写入真实运行数据，Server 通过 SDK 按 `job_id` 查询 | 六个 API 返回该真实 Job 的 Session、result、steps 和 trajectory |
-| P2.6 失败、恢复与清理 | 增加超时、幂等提交、Server 重启对账和嵌套清理 | 失败不会误报成功，清理顺序和恢复验收通过 |
-
-#### 实现约束
-
-- 使用配置选择 `mock` 或 `real` 模式，生产/真实联调环境必须显式使用 `real`；
-- Phase 2 不修改公开 API，也不要求调用方增加 image、mount、命令或凭据字段；
-- Job Server 只创建 Gateway 和 Safactory controller 两个顶层 RJob；episode RJob 仍由 Safactory controller 创建；
-- Gateway 必须先 ready，Safactory controller 才能创建；
-- 下游结果必须完成 mount 回收和数据平台持久化后，Job 才能进入 `succeeded`；
-- API 查询在真实模式下只能使用 `wt-data-platform-sdk`，不得读取 Mock fixture 或本地结果文件作为兜底。
-
-#### 交付物
-
-- 真实 RJob orchestrator、文件管理和 SDK 查询实现；
-- Gateway/Safactory image 与运行配置清单；
-- 分组 YAML/JSONL、start config 和共享结果 mount 示例；
-- Job 状态持久化、事件日志、失败分类和幂等清理任务；
-- 真实环境 E2E、失败注入和恢复测试；
-- 从 Mock 模式切换到真实模式的部署说明。
-
-#### 验收与退出条件
-
-- 一个有效请求能够创建唯一 Job，并严格按顺序创建 Gateway RJob 和 Safactory controller RJob；
-- Gateway 地址可被 controller/episode worker 访问，health 未通过时不创建 Safactory controller；
-- controller 能读取分组 YAML/JSONL，创建预期数量的 episode RJob，并从共享结果 mount 回收对应结果；
-- Session、result、steps 和 trajectory 均由 SDK 按真实 `job_id` 查询得到；
-- Server 重启不会重复创建两个顶层 RJob 或同一 episode，失败任务能够按 episode → controller → Gateway 顺序清理；
-- 第 17 节全部验收项通过后，Phase 2 和完整 MVP 完成。
+- 六个 API 使用统一的真实 Catalog、SQLite Control DB 和 SDK 查询 repository；
+- Gateway ready 是提交 Safactory controller 的硬门槛；
+- Server 重启后根据持久化 RJob ID 继续对账；
+- 契约测试和 E2E 使用真实应用链路，仅对外部 RJob 与数据平台服务注入测试替身。
 
 ## 19. 风险与决策
 
 | 风险 | 影响 | 决策 |
 |---|---|---|
-| Mock 与真实实现产生契约差异 | Phase 1 联调通过但 Phase 2 调用失败 | 两种模式复用同一 API handler/schema，并执行同一套契约测试。 |
-| 真实环境误启用 Mock 或依赖失败后回退 Mock | 调用方把伪造结果当作真实任务结果 | 部署模式必须显式配置并记录；真实模式启动或依赖失败时直接报错，禁止 Mock fallback。 |
+| 外部依赖失败被误判为任务成功 | 调用方拿到不真实的运行结果 | 启动预检失败时拒绝启动，运行时返回稳定依赖错误，不使用本地结果兜底。 |
 | Gateway 地址发现慢或返回不可路由 IP | Safactory 无法访问 Gateway | 优先使用集群 DNS/Service；必须先 health check，再提交 Safactory。 |
 | 两个顶层 RJob 并行创建 | Safactory controller 启动时没有有效 Gateway URL | 明确串行依赖，Gateway ready 是 Safactory controller 提交硬门槛。 |
 | YAML 与 JSONL 版本不一致 | Safactory 启动或任务执行失败 | 文件管理系统按版本成对发布，并为 Job 保存不可变 binding。 |
@@ -935,7 +827,7 @@ Phase 1 不要求 Job 在 Server 重启后继续存在。若联调环境需要�
 
 ## 20. 待确认项
 
-1. 模型 YAML 的路径、完整 schema、版本标识和热加载策略是什么？
+1. `gateway.config.llm_routes` 的版本标识和热加载策略是什么？
 2. Gateway 和 Safactory base image 的 registry 地址、版本策略及 entrypoint 分别是什么？
 3. RJob 平台返回的是稳定 DNS/Service，还是 worker IP；对应字段和生命周期如何？
 4. Gateway health/readiness endpoint、监听端口和成功判定是什么？

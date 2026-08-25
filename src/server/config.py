@@ -4,12 +4,10 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "mock" / "v1" / "scenarios.yaml"
 DEFAULT_AUTH_CONFIG_PATH = Path(__file__).parent / "auth" / "trusted_api_keys.yaml"
 DEFAULT_INITIALIZATION_CONFIG_PATH = (
     Path(__file__).parent / "configs" / "initialization.yaml"
 )
-DEFAULT_MODEL_CONFIG_PATH = Path("/etc/safactory/models.yaml")
 DEFAULT_RANGE_CONFIG_PATH = Path("/etc/safactory/ranges.yaml")
 DEFAULT_CONTROL_DB_PATH = Path("/var/lib/safactory/control.db")
 DEFAULT_SHARED_STORAGE_ROOT = Path("/mnt/safactory")
@@ -24,15 +22,12 @@ DEFAULT_RUNTIME_NO_PROXY = (
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    mode: str = "mock"
-    fixture_path: Path = DEFAULT_FIXTURE_PATH
     auth_config_path: Path = DEFAULT_AUTH_CONFIG_PATH
     host: str = "0.0.0.0"
     port: int = 8000
     retry_after_seconds: int = 1
     log_level: str = "INFO"
     initialization_config_path: Path = DEFAULT_INITIALIZATION_CONFIG_PATH
-    model_config_path: Path = DEFAULT_MODEL_CONFIG_PATH
     range_config_path: Path = DEFAULT_RANGE_CONFIG_PATH
     control_db_path: Path = DEFAULT_CONTROL_DB_PATH
     shared_storage_root: Path = DEFAULT_SHARED_STORAGE_ROOT
@@ -50,6 +45,7 @@ class Settings:
     rjob_verifyssl: bool = True
     rjob_retries: int = 3
     rjob_no_packaging: bool = True
+    rjob_restart_policy: str = "Never"
     rjob_namespace: str = "default"
     charged_group: str = "default"
     rjob_private_machine: str = "Group"
@@ -59,19 +55,22 @@ class Settings:
     rjob_credential_ref: str = ""
     data_platform_config_ref: str = ""
     database_environment_json: str = field(default="{}", repr=False)
+    gateway_config_json: str = field(default="{}", repr=False)
     gateway_resources_json: str = "{}"
+    gateway_requests_json: str = "{}"
     safactory_resources_json: str = "{}"
+    safactory_requests_json: str = "{}"
     episode_rjob_defaults_json: str = "{}"
-    gateway_config_local_dir: Path | None = None
-    gateway_config_source_dir: str = ""
     gateway_config_mount_dir: str = "/app/runtime-config"
     gateway_config_filename: str = "gateway.yaml"
+    gateway_name_prefix: str = "safactory-gateway"
     gateway_workdir: str = "/app"
     gateway_port: int = 8000
     gateway_scheme: str = "http"
     gateway_health_path: str = "/readyz"
     gateway_sessions_path: str = "/v1/sessions"
     runtime_no_proxy: str = DEFAULT_RUNTIME_NO_PROXY
+    safactory_name_prefix: str = "safactory"
     safactory_workdir: str = "/app"
     safactory_python_bin: str = "python"
     safactory_launcher_rjob_config: str = "config.yaml"
@@ -91,8 +90,6 @@ class Settings:
     data_platform_factory: str = "wt_data_platform_sdk:create_client"
 
     def __post_init__(self) -> None:
-        if self.mode not in {"mock", "real"}:
-            raise ValueError("mode must be either 'mock' or 'real'.")
         if not 1 <= self.port <= 65535:
             raise ValueError("Port must be between 1 and 65535.")
         if self.retry_after_seconds < 1:
@@ -105,6 +102,8 @@ class Settings:
             raise ValueError("rjob_backend must be either 'http' or 'brainpp'.")
         if self.rjob_retries < 0:
             raise ValueError("rjob_retries must not be negative.")
+        if not self.rjob_restart_policy.strip():
+            raise ValueError("rjob_restart_policy must not be empty.")
         for name, value in (
             ("environment_mount_dir", self.environment_mount_dir),
             ("results_mount_dir", self.results_mount_dir),
@@ -114,6 +113,13 @@ class Settings:
         ):
             if not Path(value).is_absolute():
                 raise ValueError(f"{name} must be an absolute container path.")
+        gateway_filename = Path(self.gateway_config_filename)
+        if gateway_filename.is_absolute() or ".." in gateway_filename.parts:
+            raise ValueError(
+                "gateway_config_filename must stay inside gateway_config_mount_dir."
+            )
+        if not self.gateway_name_prefix.strip() or not self.safactory_name_prefix.strip():
+            raise ValueError("RJob name prefixes must not be empty.")
         if self.safactory_storage_type not in {"cloud", "sqlite"}:
             raise ValueError("safactory_storage_type must be 'cloud' or 'sqlite'.")
         if (
@@ -133,15 +139,10 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
-        fixture_path = Path(
-            os.getenv("SAFACTORY_FIXTURE_PATH", str(DEFAULT_FIXTURE_PATH))
-        ).expanduser()
         auth_config_path = Path(
             os.getenv("SAFACTORY_AUTH_CONFIG_PATH", str(DEFAULT_AUTH_CONFIG_PATH))
         ).expanduser()
         return cls(
-            mode=os.getenv("SAFACTORY_MODE", "mock").strip().lower(),
-            fixture_path=fixture_path,
             auth_config_path=auth_config_path,
             host=os.getenv("SAFACTORY_HOST", "0.0.0.0"),
             port=int(os.getenv("SAFACTORY_PORT", "8000")),
@@ -152,9 +153,6 @@ class Settings:
                     "SAFACTORY_INITIALIZATION_CONFIG_PATH",
                     str(DEFAULT_INITIALIZATION_CONFIG_PATH),
                 )
-            ).expanduser(),
-            model_config_path=Path(
-                os.getenv("SAFACTORY_MODEL_CONFIG_PATH", str(DEFAULT_MODEL_CONFIG_PATH))
             ).expanduser(),
             range_config_path=Path(
                 os.getenv("SAFACTORY_RANGE_CONFIG_PATH", str(DEFAULT_RANGE_CONFIG_PATH))
@@ -189,6 +187,9 @@ class Settings:
             rjob_verifyssl=_boolean_env("SAFACTORY_RJOB_VERIFYSSL", True),
             rjob_retries=int(os.getenv("SAFACTORY_RJOB_RETRIES", "3")),
             rjob_no_packaging=_boolean_env("SAFACTORY_RJOB_NO_PACKAGING", True),
+            rjob_restart_policy=os.getenv(
+                "SAFACTORY_RJOB_RESTART_POLICY", "Never"
+            ),
             rjob_namespace=os.getenv("SAFACTORY_RJOB_NAMESPACE", "default"),
             charged_group=os.getenv("SAFACTORY_CHARGED_GROUP", "default"),
             rjob_private_machine=os.getenv("SAFACTORY_RJOB_PRIVATE_MACHINE", "Group"),
@@ -206,9 +207,14 @@ class Settings:
             database_environment_json=os.getenv(
                 "SAFACTORY_DATABASE_ENVIRONMENT_JSON", "{}"
             ),
+            gateway_config_json=os.getenv("SAFACTORY_GATEWAY_CONFIG_JSON", "{}"),
             gateway_resources_json=os.getenv("SAFACTORY_GATEWAY_RESOURCES_JSON", "{}"),
+            gateway_requests_json=os.getenv("SAFACTORY_GATEWAY_REQUESTS_JSON", "{}"),
             safactory_resources_json=os.getenv(
                 "SAFACTORY_CONTROLLER_RESOURCES_JSON", "{}"
+            ),
+            safactory_requests_json=os.getenv(
+                "SAFACTORY_CONTROLLER_REQUESTS_JSON", "{}"
             ),
             episode_rjob_defaults_json=os.getenv(
                 "SAFACTORY_EPISODE_RJOB_DEFAULTS_JSON", "{}"
@@ -219,23 +225,21 @@ class Settings:
             gateway_sessions_path=os.getenv(
                 "SAFACTORY_GATEWAY_SESSIONS_PATH", "/v1/sessions"
             ),
-            gateway_config_local_dir=(
-                Path(value).expanduser()
-                if (value := _optional_env("SAFACTORY_GATEWAY_CONFIG_LOCAL_DIR"))
-                else None
-            ),
-            gateway_config_source_dir=os.getenv(
-                "SAFACTORY_GATEWAY_CONFIG_SOURCE_DIR", ""
-            ),
             gateway_config_mount_dir=os.getenv(
                 "SAFACTORY_GATEWAY_CONFIG_MOUNT_DIR", "/app/runtime-config"
             ),
             gateway_config_filename=os.getenv(
                 "SAFACTORY_GATEWAY_CONFIG_FILENAME", "gateway.yaml"
             ),
+            gateway_name_prefix=os.getenv(
+                "SAFACTORY_GATEWAY_NAME_PREFIX", "safactory-gateway"
+            ),
             gateway_workdir=os.getenv("SAFACTORY_GATEWAY_WORKDIR", "/app"),
             runtime_no_proxy=os.getenv(
                 "SAFACTORY_RUNTIME_NO_PROXY", DEFAULT_RUNTIME_NO_PROXY
+            ),
+            safactory_name_prefix=os.getenv(
+                "SAFACTORY_CONTROLLER_NAME_PREFIX", "safactory"
             ),
             safactory_workdir=os.getenv("SAFACTORY_CONTROLLER_WORKDIR", "/app"),
             safactory_python_bin=os.getenv("SAFACTORY_PYTHON_BIN", "python"),

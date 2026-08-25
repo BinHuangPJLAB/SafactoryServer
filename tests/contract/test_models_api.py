@@ -8,8 +8,8 @@ def test_lists_only_available_public_model_fields(client: TestClient) -> None:
     assert response.headers["content-type"] == "application/json; charset=utf-8"
     assert response.json() == {
         "items": [
-            {"model_id": "model_glm_001", "name": "GLM Route"},
-            {"model_id": "model_qwen_001", "name": "Qwen Route"},
+            {"model_id": "kimi-k3", "name": "kimi-k3"},
+            {"model_id": "qwen-max", "name": "qwen-max"},
         ]
     }
     assert response.headers["X-Request-ID"].startswith("req_")

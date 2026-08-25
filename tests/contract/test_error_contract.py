@@ -1,16 +1,10 @@
-from pathlib import Path
-
-from conftest import TEST_API_KEY
 from fastapi.testclient import TestClient
-
-from server.config import Settings
-from server.main import create_app
 
 
 def test_invalid_request_uses_stable_error_envelope(client: TestClient) -> None:
     response = client.post(
         "/v1/jobs",
-        json={"model_id": " ", "range_id": "range_web_001", "extra": True},
+        json={"model_id": " ", "range_id": "range_real_001", "extra": True},
     )
 
     assert response.status_code == 400
@@ -44,24 +38,3 @@ def test_unknown_resources_have_specific_errors(client: TestClient) -> None:
     )
     assert job_response.status_code == 404
     assert job_response.json()["error"]["code"] == "JOB_NOT_FOUND"
-
-
-def test_unavailable_fixture_returns_dependency_error(
-    tmp_path: Path, auth_config_path: Path
-) -> None:
-    application = create_app(
-        Settings(
-            fixture_path=tmp_path / "missing.yaml",
-            auth_config_path=auth_config_path,
-            log_level="WARNING",
-        )
-    )
-    with TestClient(
-        application,
-        headers={"Authorization": f"Bearer {TEST_API_KEY}"},
-    ) as client:
-        response = client.get("/v1/models")
-
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
-    assert response.json()["error"]["retryable"] is True
