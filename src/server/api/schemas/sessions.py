@@ -13,6 +13,9 @@ class SessionResultResponse(ApiModel):
     result_status: ResultStatus
     score: float | None
     completed_at: UtcTimestamp | None
+    result: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     error: OptionalFailure = Field(default=None, exclude_if=lambda value: value is None)
 
 

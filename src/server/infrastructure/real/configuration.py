@@ -198,6 +198,12 @@ class RangeGroupConfig(ConfigModel):
     dataset: Path
     start_config: Path
     supports_milestones: bool = False
+    result_artifact: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.json$",
+    )
 
 
 class RangeConfig(ConfigModel):

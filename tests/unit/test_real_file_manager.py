@@ -149,6 +149,12 @@ def test_bundled_managed_environment_can_be_bound(
     )
     assert binding.total_episodes == 1
     assert full_binding.total_episodes == 4
+    smoke_range = catalog.resolve_range("range_cyberrange_smoke_001")
+    full_range = catalog.resolve_range("range_cyberrange_full_001")
+    assert smoke_range is not None
+    assert full_range is not None
+    assert smoke_range.groups[0].result_artifact == "runtime-test-result.json"
+    assert full_range.groups[0].result_artifact == "runtime-test-result.json"
     assert harbor_binding.total_episodes == 474
     assert harbor_binding.launcher_rjob_config_path == (
         f"{harbor_binding.input_target}/launcher.rjob.yaml"

@@ -4,7 +4,7 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v2.7 |
+| 文档版本 | v2.8 |
 | 文档状态 | Frozen |
 | 更新日期 | 2026-08-31 |
 | Base Path | `/v1` |
@@ -308,7 +308,8 @@ HTTP/1.1 200 OK
 
 ### `GET /v1/sessions/result`
 
-查询指定 Job 下 Session 的运行状态和得分。该接口可以在运行中调用。
+查询指定 Job 下 Session 的运行状态和得分。该接口可以在运行中调用；如果对应环境在
+`ranges.yaml` 中声明了 `result_artifact`，还会返回该 JSON 文件的内容。
 
 ### Query parameters
 
@@ -339,7 +340,7 @@ Retry-After: 2
 }
 ```
 
-### Response：结果已完成
+### Response：结果已完成（环境未配置结果文件）
 
 ```http
 HTTP/1.1 200 OK
@@ -354,6 +355,32 @@ HTTP/1.1 200 OK
 }
 ```
 
+### Response：结果已完成（环境配置了结果文件）
+
+例如环境配置了 `result_artifact: runtime-test-result.json`：
+
+```http
+HTTP/1.1 200 OK
+```
+
+```json
+{
+  "session_id": "session_01K3ABC...",
+  "result_status": "succeeded",
+  "score": 8.5,
+  "completed_at": "2026-08-17T08:04:10Z",
+  "result": {
+    "schema_version": "runtime-test-result/v1",
+    "e2e_success": true,
+    "objective_state": "completed"
+  }
+}
+```
+
+`result` 内部字段由具体环境定义，服务端不改名或展开这些字段。未配置
+`result_artifact` 时不返回 `result`。运行中的 Session 尚未生成结果文件时，也暂不返回
+`result`，调用方继续根据 `Retry-After` 轮询。
+
 字段说明：
 
 | 字段 | 类型 | 必有 | 说明 |
@@ -362,9 +389,21 @@ HTTP/1.1 200 OK
 | `result_status` | string | 是 | `pending`、`running`、`succeeded` 或 `failed` |
 | `score` | number/null | 是 | 最终得分；结果未完成或失败时为 `null` |
 | `completed_at` | string/null | 是 | 结果完成时间 |
+| `result` | object | 否 | `ranges.yaml` 配置的环境结果 JSON，内部结构由环境定义 |
 | `error` | object | 否 | `result_status=failed` 时的失败原因 |
 
-Job 不存在时返回 `404 JOB_NOT_FOUND`。Session 不存在或不属于指定 Job 时返回 `404 SESSION_NOT_FOUND`。结果尚未完成时返回 200 和空得分，调用方可根据 `Retry-After` 继续轮询。
+### 状态码
+
+| HTTP | Error code | 说明 |
+|---:|---|---|
+| 200 | — | 返回公共结果；配置的环境结果文件存在时同时返回 `result` |
+| 400 | `INVALID_REQUEST` | Query 参数缺失或格式错误 |
+| 403 | `FORBIDDEN` | 认证凭据缺失或无效 |
+| 404 | `JOB_NOT_FOUND` | Job 不存在 |
+| 404 | `SESSION_NOT_FOUND` | Session 不存在或不属于指定 Job |
+| 503 | `DEPENDENCY_UNAVAILABLE` | 数据平台或已配置的终态结果文件不可读取、缺失或内容无效 |
+
+结果尚未完成时返回 200 和空得分，调用方可根据 `Retry-After` 继续轮询。
 
 ## 8. 使用 Session ID 查询轨迹 step
 

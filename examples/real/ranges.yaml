@@ -8,6 +8,7 @@ ranges:
     groups:
       - env_name: cyberrange
         supports_milestones: true
+        result_artifact: runtime-test-result.json
         dataset: cyberrange/datasets/cyberrange_smoke.jsonl
         start_config: cyberrange/cyberrange_start.rjob.yaml
 
@@ -19,6 +20,7 @@ ranges:
     groups:
       - env_name: cyberrange
         supports_milestones: true
+        result_artifact: runtime-test-result.json
         dataset: cyberrange/datasets/cyberrange_cases.jsonl
         start_config: cyberrange/cyberrange_start.rjob.yaml
 

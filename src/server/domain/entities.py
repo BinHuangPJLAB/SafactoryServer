@@ -74,6 +74,7 @@ class SessionResult:
     score: float | None
     completed_at: datetime | None
     retry_after_seconds: int | None = None
+    result: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

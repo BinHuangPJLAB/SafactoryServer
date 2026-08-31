@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from server.auth.context import get_authenticated_username, get_request_id
@@ -36,10 +37,15 @@ from server.infrastructure.real.file_manager import (
 LOGGER = logging.getLogger("server.data_queries")
 MILESTONES_FILENAME = "milestones.json"
 MAX_MILESTONES_BYTES = 1024 * 1024
+MAX_RESULT_ARTIFACT_BYTES = 1024 * 1024
 
 
 class MilestoneSnapshotError(RuntimeError):
     """A published milestone snapshot is unsafe or invalid."""
+
+
+class ResultArtifactError(RuntimeError):
+    """A configured environment result artifact is unsafe or invalid."""
 
 
 class RealRuntimeRepository:
@@ -118,7 +124,7 @@ class RealRuntimeRepository:
         return JobSessions(job_id, status, session_ids, retry_after, failure)
 
     async def get_result(self, job_id: str, session_id: str) -> SessionResult:
-        await self._require_job(job_id)
+        job = await self._require_job(job_id)
         LOGGER.info("job_id=%s session_id=%s operation=get_result", job_id, session_id)
         try:
             result = await self._data.get_result(job_id, session_id)
@@ -130,14 +136,49 @@ class RealRuntimeRepository:
                 ErrorCode.SESSION_NOT_FOUND,
                 {"job_id": job_id, "session_id": session_id},
             )
+
+        try:
+            range_config = self._catalog.resolve_range(job.range_id)
+        except TrustedConfigError as exc:
+            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE) from exc
+        if range_config is None or len(range_config.groups) != 1:
+            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+
+        artifact_name = range_config.groups[0].result_artifact
+        if artifact_name is not None:
+            if not SAFE_NAME.fullmatch(session_id):
+                raise DomainError(ErrorCode.INVALID_REQUEST, {"fields": ["session_id"]})
+            payload = None
+            if job.binding_json is not None:
+                try:
+                    binding = JobFileBinding.from_json(job.binding_json)
+                    payload = await asyncio.to_thread(
+                        _read_result_artifact,
+                        Path(binding.result_local_path),
+                        job_id,
+                        session_id,
+                        artifact_name,
+                    )
+                except (
+                    FileBindingError,
+                    json.JSONDecodeError,
+                    KeyError,
+                    ResultArtifactError,
+                    TypeError,
+                ) as exc:
+                    raise DomainError(
+                        ErrorCode.DEPENDENCY_UNAVAILABLE,
+                        {"job_id": job_id, "session_id": session_id},
+                    ) from exc
+            if payload is None and result.result_status.value in {"succeeded", "failed"}:
+                raise DomainError(
+                    ErrorCode.DEPENDENCY_UNAVAILABLE,
+                    {"job_id": job_id, "session_id": session_id},
+                )
+            result = replace(result, result=payload)
+
         if result.result_status.value in {"pending", "running"}:
-            return SessionResult(
-                result.session_id,
-                result.result_status,
-                result.score,
-                result.completed_at,
-                self._retry_after_seconds,
-            )
+            return replace(result, retry_after_seconds=self._retry_after_seconds)
         return result
 
     async def get_milestones(
@@ -298,4 +339,32 @@ def _read_milestone_snapshot(
         raise MilestoneSnapshotError("milestone snapshot is unreadable") from exc
     if not isinstance(raw, dict) or raw.get("schema_version") != "agent-range.milestones/v1":
         raise MilestoneSnapshotError("milestone snapshot schema is unsupported")
+    return raw
+
+
+def _read_result_artifact(
+    result_local_path: Path,
+    job_id: str,
+    session_id: str,
+    artifact_name: str,
+) -> dict[str, object] | None:
+    job_directory = result_local_path / job_id
+    session_directory = job_directory / session_id
+    path = session_directory / artifact_name
+    if not path.exists():
+        return None
+    if any(item.is_symlink() for item in (job_directory, session_directory, path)):
+        raise ResultArtifactError("result artifact path must not contain symlinks")
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_RESULT_ARTIFACT_BYTES:
+            raise ResultArtifactError(
+                "result artifact must be a regular bounded file"
+            )
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ResultArtifactError("result artifact is unreadable") from exc
+    if not isinstance(raw, dict):
+        raise ResultArtifactError("result artifact must contain a JSON object")
     return raw

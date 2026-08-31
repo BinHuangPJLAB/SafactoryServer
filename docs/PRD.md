@@ -442,16 +442,20 @@ range_id
 │           ├── dataset.jsonl
 │           └── start.rjob.yaml
 └── results/<job_id>/
-    └── <session_id>/result.json
+    └── <session_id>/
+        ├── result.json
+        └── <result_artifact>.json
 
 Safactory controller 容器内：
 /mnt/safactory-job/config.yaml
 /mnt/safactory-job/groups/<env-group>/dataset.jsonl
 /mnt/safactory-job/groups/<env-group>/start.rjob.yaml
 /app/results/<job_id>/<session_id>/result.json
+/app/results/<job_id>/<session_id>/<result_artifact>.json
 
 episode worker 容器内：
 /app/results/<job_id>/<session_id>/result.json
+/app/results/<job_id>/<session_id>/<result_artifact>.json
 ```
 
 controller 与 episode worker 推荐把同一结果存储 source 都 mount 到 `/app/results`，以便直接使用当前兼容路径 `/app/results/<job_id>/<session_id>/result.json`。如使用不同 target，controller 必须有确定的路径映射；也可通过 `SAFACTORY_RESULT_PATH` 指定等价的唯一文件路径。实际约定必须在模板中固定。
@@ -474,10 +478,11 @@ controller 与 episode worker 推荐把同一结果存储 source 都 mount 到 `
 - 结果 mount 必须使用同一个 Job 隔离的共享存储 source：episode worker 以可写方式挂载，Safactory controller 至少以可读方式挂载；controller 如承担清理职责可获得受限写权限；
 - 每个 episode 必须使用包含 `job_id` 和 `session_id`（或等价唯一 ID）的独立路径，禁止不同副本覆盖同一文件；
 - episode worker 必须先将结果写入临时文件，再以原子 rename/commit 发布最终 `result.json`，避免 controller 读取半成品；
+- 环境组可在 `ranges.yaml` 中通过 `result_artifact` 声明一个额外的公开 JSON 结果文件；runner 必须将该文件原子发布到同一 Session 结果目录；
 - controller 只有在下游 RJob 进入终态且最终文件存在、格式有效、标识匹配后，才能认定结果回收成功；
 - controller 读取后负责将结果与 `job_id/group_id/session_id` 关联并完成汇总/评估；对外结果仍须写入数据平台并通过 SDK 查询；
 - 下游 RJob 和结果文件在 controller 完成读取、校验和数据持久化前不得删除；失败现场按保留策略处理；
-- 结果目录是 episode worker 到 Safactory controller 的内部交接介质，不是公开查询 API 的数据源。
+- `result.json` 仍是 episode worker 到 Safactory controller 的内部交接文件；只有 Range 显式声明的 `result_artifact` 可由结果查询 API 作为环境自定义 `result` 对象返回。
 
 ## 10. 运行数据与 API 查询
 
@@ -696,6 +701,7 @@ sequenceDiagram
 - 每次 episode 使用唯一的 `env_id/session_id` 和幂等 RJob 提交键；
 - 下游 RJob 使用对应环境的受信任 image、start config、Gateway URL 和结果 mount；
 - runner 将 `SimulationStartResult` 写入 `SAFACTORY_RESULT_PATH` 指向的唯一文件，或按固定结果根目录写入等价路径；
+- 配置了 `result_artifact` 的环境，runner 还必须将对应 JSON object 原子复制到 `SAFACTORY_RESULT_PATH` 所在目录；
 - controller 在下游 RJob 终态后从共享 mount 读取、校验和关联结果；结果缺失、损坏或标识不匹配时按 episode 失败处理；
 - 结果回收和数据平台持久化完成前不得清理下游 RJob 或结果文件。
 
