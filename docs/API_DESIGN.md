@@ -4,9 +4,14 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v2.4 |
-| 更新日期 | 2026-08-20 |
+| 文档版本 | v2.6 |
+| 文档状态 | Frozen |
+| 更新日期 | 2026-08-31 |
 | Base Path | `/v1` |
+
+本版本是 v1 的冻结契约。既有 Method、Path、请求字段、响应字段、字段类型、状态语义和
+错误码不得做不兼容修改；不兼容需求必须发布新的 API 大版本。仅修正文案、补充不改变
+调用方行为的说明，不构成协议变更。
 
 ## 1. 设计范围
 
@@ -25,11 +30,12 @@
 
 - 一个 Job 只运行一个靶场；
 - 当前靶场为单页面、单拓扑，一个 Job 可对应一个或多个 Session；
-- `range_id` 由基座提供，其值必须与工程中心保存的靶场模板 ID 对齐；
+- `range_id` 由基座受信任 Range Catalog 提供，其值必须与工程中心保存的靶场模板 ID 对齐；
 - 模型信息来自 `initialization.yaml` 中 `gateway.config.llm_routes`；route 名称直接作为 `model_id` 和 `name` 返回；
 - `model_id` 必须来自模型查询接口，且创建 Job 时仍处于可用状态；
 - ID 均为不透明字符串，调用方不得解析或自行拼接 ID；
 - 创建 Job 后的所有查询都必须携带 `job_id`，服务端必须校验 Session、Step 与 Job 的归属关系；
+- 所有接口都需要 Bearer API Key；Job 只对创建它的认证用户可见，跨用户查询统一按资源不存在处理；
 - Job 异步运行，`session_id` 列表、得分和轨迹均可能暂未生成，调用方应按本文约定轮询。
 
 ## 2. 调用流程
@@ -66,6 +72,7 @@ sequenceDiagram
 | 4 | GET | `/v1/sessions/result` | 使用 query 参数 `job_id`、`session_id` 查询运行结果（得分） |
 | 5 | GET | `/v1/sessions/steps` | 使用 query 参数 `job_id`、`session_id` 查询轨迹 step 数和 Step ID |
 | 6 | GET | `/v1/sessions/steps/trajectory` | 使用 query 参数 `job_id`、`session_id`、`step_id` 查询某一步具体轨迹 |
+| 7 | GET | `/v1/sessions/milestones` | 使用 query 参数 `job_id`、`session_id` 查询环境支持的里程碑进度 |
 
 ## 3. 通用约定
 
@@ -99,18 +106,32 @@ sequenceDiagram
 
 客户端逻辑应依赖稳定的 `error.code`，不得依赖 `message` 文案。
 
-### 3.3 通用状态码
+### 3.3 认证与请求追踪
+
+所有请求必须携带：
+
+```http
+Authorization: Bearer <api-key>
+```
+
+凭据缺失、格式错误或无效时返回 `403 FORBIDDEN`。服务端为每次请求生成不透明的
+`request_id`，通过响应头 `X-Request-ID` 返回；错误响应正文中的 `request_id` 必须与响应头一致。
+
+认证用户只能查询自己创建的 Job。对不存在或不属于当前用户的 `job_id`，统一返回
+`404 JOB_NOT_FOUND`，不得泄露资源是否属于其他用户。
+
+### 3.4 通用状态码
 
 | HTTP 状态码 | 说明 |
 |---:|---|
 | 200 | 查询成功 |
 | 202 | Job 创建请求已接受 |
 | 400 | 请求格式或参数格式错误 |
+| 403 | 认证凭据缺失或无效 |
 | 404 | 指定资源不存在 |
-| 409 | 资源存在，但依赖数据尚未就绪或状态冲突 |
-| 422 | `model_id` 或 `range_id` 无效 |
+| 422 | 请求语义无效，或目标环境不支持所请求的能力 |
 | 500 | 未分类的服务端错误 |
-| 503 | 工程中心、执行引擎或存储暂不可用 |
+| 503 | Range Catalog、执行引擎或数据存储暂不可用 |
 
 ## 4. 查询基座支持的模型
 
@@ -183,7 +204,7 @@ HTTP/1.1 200 OK
 服务端必须完成以下校验：
 
 - `model_id` 存在且当前可用；
-- `range_id` 能在工程中心唯一匹配一个可用的靶场模板；
+- `range_id` 能在受信任 Range Catalog 中唯一匹配一个可用配置，且该 ID 与工程中心模板对齐；
 - 模型和 Range 分别校验，不维护或检查模型与 Range 的组合白名单。
 
 ### Response
@@ -211,9 +232,9 @@ Location: /v1/jobs/sessions?job_id=job_01K2XYZ...
 |---|---:|---|
 | `MODEL_NOT_FOUND` | 422 | `model_id` 不存在 |
 | `MODEL_NOT_AVAILABLE` | 422 | 模型当前不可用于新 Job |
-| `RANGE_NOT_FOUND` | 422 | `range_id` 无法匹配工程中心靶场模板 |
+| `RANGE_NOT_FOUND` | 422 | `range_id` 无法匹配受信任 Range Catalog |
 | `RANGE_NOT_AVAILABLE` | 422 | 靶场模板当前不可用 |
-| `DEPENDENCY_UNAVAILABLE` | 503 | 模型配置、工程中心或执行依赖暂不可用 |
+| `DEPENDENCY_UNAVAILABLE` | 503 | 模型配置、Range Catalog 或执行依赖暂不可用 |
 
 ## 6. 使用 Job ID 查询 Session ID 列表
 
@@ -473,22 +494,128 @@ HTTP/1.1 200 OK
 
 服务端必须过滤密钥、鉴权信息、宿主机路径等敏感数据。不存在的 `job_id` 返回 `404 JOB_NOT_FOUND`；`session_id` 不存在或不属于指定 Job 时返回 `404 SESSION_NOT_FOUND`；`step_id` 不存在或不属于该 Session 时统一返回 `404 STEP_NOT_FOUND`，不得返回其他 Job 或 Session 的轨迹。
 
-## 10. 稳定错误码
+## 10. 查询 Session 里程碑
+
+### `GET /v1/sessions/milestones`
+
+查询指定 Job 下 Session 的最新里程碑进度。服务端每次请求都重新读取当前
+`milestones.json`；仅声明支持 milestone 的环境可使用此接口。
+
+```http
+GET /v1/sessions/milestones?job_id=job_01K2XYZ...&session_id=session_01K3ABC... HTTP/1.1
+```
+
+### Response：里程碑已生成
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: no-store
+```
+
+```json
+{
+  "job_id": "job_01K2XYZ...",
+  "session_id": "session_01K3ABC...",
+  "milestone_status": "available",
+  "snapshot": {
+    "schema_version": "agent-range.milestones/v1",
+    "run_id": "run_0123456789abcdef",
+    "updated_at": "2026-08-31T06:19:56.392304Z",
+    "completed": 2,
+    "verified": 0,
+    "total": 12,
+    "latest_reached": "react-root-shell",
+    "next_expected": "dubbo-user-shell",
+    "milestones": [
+      {
+        "ordinal": 0,
+        "id": "react-user-shell",
+        "service": "react",
+        "status": "observed",
+        "observed_at": "2026-08-31T06:09:19.642840Z",
+        "source": "provider_telemetry",
+        "trust_class": "guest-reported"
+      }
+    ]
+  }
+}
+```
+
+`verified`、`observed_at` 和 `verified_at` 为可选字段；`milestones[].status` 可能为
+`pending`、`candidate`、`observed` 或 `verified`。API 按文件原值返回状态，不自动升级。
+
+### Response：里程碑尚未生成
+
+```http
+HTTP/1.1 200 OK
+Retry-After: 5
+Cache-Control: no-store
+```
+
+```json
+{
+  "job_id": "job_01K2XYZ...",
+  "session_id": "session_01K3ABC...",
+  "milestone_status": "pending",
+  "snapshot": null
+}
+```
+
+### Response：环境不支持 milestone
+
+```http
+HTTP/1.1 422 Unprocessable Content
+```
+
+```json
+{
+  "error": {
+    "code": "MILESTONES_NOT_SUPPORTED",
+    "message": "Milestones are not supported for this environment.",
+    "details": {
+      "job_id": "job_01K2XYZ...",
+      "session_id": "session_01K3ABC..."
+    },
+    "retryable": false
+  },
+  "request_id": "req_01K4DEF..."
+}
+```
+
+### 状态码
+
+| HTTP | Error code/状态 | 说明 |
+|---:|---|---|
+| 200 | `available` | 返回当前最新的里程碑快照 |
+| 200 | `pending` | Session 存在但快照尚未生成；按 `Retry-After` 轮询 |
+| 400 | `INVALID_REQUEST` | 请求参数格式错误 |
+| 403 | `FORBIDDEN` | 认证凭据缺失或无效 |
+| 404 | `JOB_NOT_FOUND` | Job 不存在或无权访问 |
+| 404 | `SESSION_NOT_FOUND` | Session 不存在或不属于指定 Job |
+| 404 | `MILESTONES_NOT_FOUND` | Job 已结束，但没有生成里程碑快照 |
+| 422 | `MILESTONES_NOT_SUPPORTED` | 目标环境不支持 milestone；不可重试 |
+| 503 | `MILESTONES_UNAVAILABLE` | 快照暂时不可读取或内容无效；可重试 |
+
+## 11. 稳定错误码
 
 | Error code | HTTP | Retryable | 说明 |
 |---|---:|---:|---|
+| `FORBIDDEN` | 403 | 否 | 认证凭据缺失、格式错误或无效 |
 | `INVALID_REQUEST` | 400 | 否 | 请求格式或参数格式错误 |
 | `MODEL_NOT_FOUND` | 422 | 否 | 模型不存在 |
 | `MODEL_NOT_AVAILABLE` | 422 | 否 | 模型当前不可用 |
-| `RANGE_NOT_FOUND` | 422 | 否 | 靶场 ID 无法匹配工程中心模板 |
+| `RANGE_NOT_FOUND` | 422 | 否 | 靶场 ID 无法匹配受信任 Range Catalog |
 | `RANGE_NOT_AVAILABLE` | 422 | 视情况 | 靶场模板当前不可用 |
 | `JOB_NOT_FOUND` | 404 | 否 | Job 不存在 |
 | `SESSION_NOT_FOUND` | 404 | 否 | Session 不存在或不属于指定 Job |
 | `STEP_NOT_FOUND` | 404 | 否 | Step 不存在或不属于指定 Session |
-| `DEPENDENCY_UNAVAILABLE` | 503 | 是 | 模型配置、工程中心、执行引擎或存储暂不可用 |
+| `MILESTONES_NOT_FOUND` | 404 | 否 | Job 已结束但未生成里程碑快照 |
+| `MILESTONES_NOT_SUPPORTED` | 422 | 否 | 目标环境不支持 milestone |
+| `MILESTONES_UNAVAILABLE` | 503 | 是 | 里程碑快照暂时不可读取或内容无效 |
+| `DEPENDENCY_UNAVAILABLE` | 503 | 是 | 模型配置、Range Catalog、执行引擎或存储暂不可用 |
 | `INTERNAL_ERROR` | 500 | 是 | 未分类的服务端错误 |
 
-## 11. 闭环验收标准
+## 12. 闭环验收标准
 
 使用一组有效的 `model_id` 和 `range_id`，调用方必须能够完成以下流程：
 
