@@ -83,7 +83,9 @@ Server 在 `environment.local_path/<job_id>` 原子发布不可变快照；RJob 
 - `model_id` 只从请求参数取得并在 `gateway.config.llm_routes` 中校验，Range 不限制模型；
 - agent config 的 `environments[]` 与 range 的 `env_name` 一致；
 - dataset 非空且每行是 JSON object；
-- start config 的 `agent_name`、`runner_entrypoint` 和 results mount 有效；
+- start config 的 `agent_name`、`runner_entrypoint.command` 和 results mount 有效；
+- `runner_entrypoint.source` 可选：声明时必须是可用的绝对路径或相对 start config
+  的文件；省略时 runner 必须由受信任镜像或 RJob mount 提供；
 - environment image、`env_num` 和 `env_params` 有效。
 
 ## Gateway 地址与就绪
@@ -102,6 +104,17 @@ Control DB 使用 SQLite WAL，部署时应只有一个 writer。每个顶层 RJ
 派生的稳定名称；创建前会查询同名 RJob，避免 Server 在提交后、写 DB 前崩溃造成重复创建。
 Server 重启后按已保存的 RJob 名称继续轮询。终态清理顺序为 Safactory launcher、Gateway；
 删除失败会保留清理标记并后台重试。
+
+如需保留顶层 RJob 排查问题，可在启动 Server 前设置：
+
+```bash
+export SAFACTORY_KEEP_RJOBS=true
+```
+
+该开关默认为 `false`。设为 `true` 后，Server 不会主动 stop/delete Safactory controller
+和 Gateway RJob，但会清除 Control DB 的待清理标记，避免重启后反复尝试。episode 子 RJob
+仍按 start config 的 `cleanup_on_finish`/`keep_failed_jobs` 执行，平台配置的
+`rjob.auto_delete_duration` 也仍然生效。
 
 ## 日志与终态诊断
 

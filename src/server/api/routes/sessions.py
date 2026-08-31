@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Response
 from server.api.dependencies import get_job_service
 from server.api.schemas.common import RequiredId
 from server.api.schemas.sessions import (
+    SessionMilestonesResponse,
     SessionResultResponse,
     SessionStepsResponse,
     StepItem,
@@ -13,6 +14,20 @@ from server.api.schemas.sessions import (
 from server.application.service import JobService
 
 router = APIRouter()
+
+
+@router.get("/sessions/milestones", response_model=SessionMilestonesResponse)
+async def get_session_milestones(
+    job_id: RequiredId,
+    session_id: RequiredId,
+    response: Response,
+    service: Annotated[JobService, Depends(get_job_service)],
+) -> SessionMilestonesResponse:
+    result = await service.get_milestones(job_id, session_id)
+    response.headers["Cache-Control"] = "no-store"
+    if result.retry_after_seconds is not None:
+        response.headers["Retry-After"] = str(result.retry_after_seconds)
+    return SessionMilestonesResponse.model_validate(result)
 
 
 @router.get("/sessions/result", response_model=SessionResultResponse)
@@ -52,4 +67,3 @@ async def get_step_trajectory(
 ) -> StepTrajectoryResponse:
     result = await service.get_trajectory(job_id, session_id, step_id)
     return StepTrajectoryResponse.model_validate(result)
-

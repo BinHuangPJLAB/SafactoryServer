@@ -1,18 +1,22 @@
 .git
-.gitignore
 .venv
 .pytest_cache
 .ruff_cache
 __pycache__
 *.py[cod]
-env/**/__pycache__
-env/**/runtime
-env/**/results
 *.egg-info
-build
-dist
 .env
-tests
-docs
-examples
-scripts
+
+# Intentionally keep .env.real and repository data (including runtime/results)
+# in the image. Do not publish the resulting image to an untrusted registry.
+!.env.real
+!deploy/
+!deploy/**
+!examples/
+!examples/**
+!env/
+!env/**
+!runtime/
+!runtime/**
+!results/
+!results/**

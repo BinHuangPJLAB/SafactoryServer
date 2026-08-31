@@ -21,6 +21,11 @@ class ResultStatus(StrEnum):
     FAILED = "failed"
 
 
+class MilestoneStatus(StrEnum):
+    PENDING = "pending"
+    AVAILABLE = "available"
+
+
 @dataclass(frozen=True, slots=True)
 class Model:
     model_id: str
@@ -31,6 +36,7 @@ class Model:
 @dataclass(frozen=True, slots=True)
 class Range:
     range_id: str
+    description: str
     available: bool
     availability_retryable: bool
 
@@ -67,6 +73,15 @@ class SessionResult:
     result_status: ResultStatus
     score: float | None
     completed_at: datetime | None
+    retry_after_seconds: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionMilestones:
+    job_id: str
+    session_id: str
+    milestone_status: MilestoneStatus
+    snapshot: dict[str, Any] | None
     retry_after_seconds: int | None = None
 
 

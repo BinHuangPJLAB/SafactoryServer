@@ -8,7 +8,7 @@ result、step 和 trajectory 只通过 `wt-data-platform-sdk` 查询。
 
 镜像、DB、RJob 连接、env/results 共享盘映射、完整 Gateway config 和 launcher 参数统一由
 [`examples/real/initialization.yaml`](examples/real/initialization.yaml) 管理。环境信息维护在
-[`env/`](env/README.md)，range 到 CyberRange case 的映射维护在
+[`env/`](env/README.md)，range 到 CyberRange/Harbor workload 的映射维护在
 [`examples/real/ranges.yaml`](examples/real/ranges.yaml)。
 
 `GET /v1/models` 直接枚举 `gateway.config.llm_routes`，route 名称同时作为响应的

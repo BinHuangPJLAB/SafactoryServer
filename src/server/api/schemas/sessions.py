@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import Field
 
 from server.api.schemas.common import ApiModel, OptionalFailure, UtcTimestamp
-from server.domain.entities import ResultStatus
+from server.domain.entities import MilestoneStatus, ResultStatus
 
 
 class SessionResultResponse(ApiModel):
@@ -14,6 +14,13 @@ class SessionResultResponse(ApiModel):
     score: float | None
     completed_at: UtcTimestamp | None
     error: OptionalFailure = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class SessionMilestonesResponse(ApiModel):
+    job_id: str
+    session_id: str
+    milestone_status: MilestoneStatus
+    snapshot: dict[str, Any] | None
 
 
 class StepItem(ApiModel):
@@ -50,4 +57,3 @@ class StepTrajectoryResponse(ApiModel):
     started_at: UtcTimestamp | None
     finished_at: UtcTimestamp | None
     trajectory: Trajectory
-

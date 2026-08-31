@@ -1,29 +1,35 @@
 schema_version: "1.0"
 ranges:
   - range_id: range_cyberrange_smoke_001
+    description: CyberRange Range 3 冒烟验证，用于快速检查运行链路
     available: true
     availability_retryable: false
     agent_config: cyberrange/cyberrange_config.smoke.rjob.yaml
     groups:
       - env_name: cyberrange
+        supports_milestones: true
         dataset: cyberrange/datasets/cyberrange_smoke.jsonl
         start_config: cyberrange/cyberrange_start.rjob.yaml
 
   - range_id: range_cyberrange_full_001
+    description: CyberRange Range 3 至 Range 6 完整攻防评测
     available: true
     availability_retryable: false
     agent_config: cyberrange/cyberrange_config.rjob.yaml
     groups:
       - env_name: cyberrange
+        supports_milestones: true
         dataset: cyberrange/datasets/cyberrange_cases.jsonl
         start_config: cyberrange/cyberrange_start.rjob.yaml
 
   - range_id: range_harbor_vulhub_claude_kimi_all_001
+    description: Harbor Vulhub 漏洞任务完整评测
     available: true
     availability_retryable: false
     agent_config: harbor/harbor_vulhub_claude_kimi_all_config.rjob.yaml
     launcher_rjob_config: harbor/harbor_vulhub_rjob_config.yaml
     groups:
       - env_name: harbor
+        supports_milestones: false
         dataset: harbor/datasets/harbor_vulhub_all.jsonl
         start_config: harbor/harbor_vulhub_start.rjob.yaml

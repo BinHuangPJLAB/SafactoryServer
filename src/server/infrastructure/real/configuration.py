@@ -197,10 +197,12 @@ class RangeGroupConfig(ConfigModel):
     env_name: str = Field(min_length=1)
     dataset: Path
     start_config: Path
+    supports_milestones: bool = False
 
 
 class RangeConfig(ConfigModel):
     range_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
     available: bool = True
     availability_retryable: bool = False
     agent_config: Path
@@ -249,6 +251,21 @@ class RealCatalog:
             for model_name in self.gateway_routes
         )
 
+    async def list_ranges(self) -> tuple[Range, ...]:
+        try:
+            ranges = self._ranges().ranges
+        except TrustedConfigError as exc:
+            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE) from exc
+        return tuple(
+            Range(
+                range_id=item.range_id,
+                description=item.description,
+                available=item.available,
+                availability_retryable=item.availability_retryable,
+            )
+            for item in ranges
+        )
+
     async def get_model(self, model_id: str) -> Model | None:
         if model_id not in self.gateway_routes:
             return None
@@ -263,6 +280,7 @@ class RealCatalog:
             return None
         return Range(
             range_id=item.range_id,
+            description=item.description,
             available=item.available,
             availability_retryable=item.availability_retryable,
         )

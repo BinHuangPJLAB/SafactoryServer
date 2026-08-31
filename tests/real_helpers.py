@@ -36,10 +36,12 @@ def write_real_configs(root: Path) -> Path:
 schema_version: "1.0"
 ranges:
   - range_id: range_real_001
+    description: Browser test range
     available: true
     agent_config: agent.yaml
     groups:
       - env_name: browser
+        supports_milestones: true
         dataset: dataset.jsonl
         start_config: browser.start.yaml
 """.strip(),

@@ -230,7 +230,7 @@ class SharedFileManager:
             _validate_start_config(
                 start_document, group.env_name, result_target=self._result_target
             )
-            _validate_runner_source(start_document, start_source.parent)
+            _validate_runner_entrypoint(start_document, start_source.parent)
 
             group_dir = staging / "groups" / group.env_name
             _copy_environment_files(start_source.parent, group_dir)
@@ -356,10 +356,19 @@ def _validate_launcher_rjob_config(document: dict[str, Any]) -> None:
         raise FileBindingError("launcher RJob config must contain a non-empty rjob mapping")
 
 
-def _validate_runner_source(document: dict[str, Any], source_dir: Path) -> None:
-    source = document["container"]["runner_entrypoint"].get("source")
+def _validate_runner_entrypoint(document: dict[str, Any], source_dir: Path) -> None:
+    entrypoint = document["container"]["runner_entrypoint"]
+    command = entrypoint.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise FileBindingError("runner_entrypoint.command is missing")
+
+    # A trusted environment may provide its runner through an image or RJob
+    # mount. Only validate a local source when the start config declares one.
+    if "source" not in entrypoint:
+        return
+    source = entrypoint.get("source")
     if not isinstance(source, str) or not source.strip():
-        raise FileBindingError("runner_entrypoint.source is missing")
+        raise FileBindingError("runner_entrypoint.source is invalid")
     configured = Path(source)
     if not configured.is_absolute() and not (source_dir / configured).is_file():
         raise FileBindingError(f"relative runner source is unavailable: {source}")

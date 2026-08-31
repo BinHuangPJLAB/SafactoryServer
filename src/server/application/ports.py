@@ -7,6 +7,7 @@ from server.domain.entities import (
     JobSessions,
     Model,
     Range,
+    SessionMilestones,
     SessionResult,
     SessionSteps,
     StepTrajectory,
@@ -15,6 +16,8 @@ from server.domain.entities import (
 
 class CatalogPort(Protocol):
     async def list_models(self) -> tuple[Model, ...]: ...
+
+    async def list_ranges(self) -> tuple[Range, ...]: ...
 
     async def get_model(self, model_id: str) -> Model | None: ...
 
@@ -28,9 +31,12 @@ class RuntimePort(Protocol):
 
     async def get_result(self, job_id: str, session_id: str) -> SessionResult: ...
 
+    async def get_milestones(
+        self, job_id: str, session_id: str
+    ) -> SessionMilestones: ...
+
     async def get_steps(self, job_id: str, session_id: str) -> SessionSteps: ...
 
     async def get_trajectory(
         self, job_id: str, session_id: str, step_id: str
     ) -> StepTrajectory: ...
-

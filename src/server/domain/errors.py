@@ -15,6 +15,9 @@ class ErrorCode(StrEnum):
     JOB_NOT_FOUND = "JOB_NOT_FOUND"
     SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     STEP_NOT_FOUND = "STEP_NOT_FOUND"
+    MILESTONES_NOT_FOUND = "MILESTONES_NOT_FOUND"
+    MILESTONES_NOT_SUPPORTED = "MILESTONES_NOT_SUPPORTED"
+    MILESTONES_UNAVAILABLE = "MILESTONES_UNAVAILABLE"
     DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
@@ -45,6 +48,15 @@ ERROR_SPECS = {
     ),
     ErrorCode.STEP_NOT_FOUND: ErrorSpec(
         404, "The specified step does not exist for this session.", False
+    ),
+    ErrorCode.MILESTONES_NOT_FOUND: ErrorSpec(
+        404, "The milestone snapshot does not exist for this session.", False
+    ),
+    ErrorCode.MILESTONES_NOT_SUPPORTED: ErrorSpec(
+        422, "Milestones are not supported for this environment.", False
+    ),
+    ErrorCode.MILESTONES_UNAVAILABLE: ErrorSpec(
+        503, "The milestone snapshot is temporarily unavailable.", True
     ),
     ErrorCode.DEPENDENCY_UNAVAILABLE: ErrorSpec(
         503, "A required service dependency is unavailable.", True

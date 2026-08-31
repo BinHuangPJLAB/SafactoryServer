@@ -3,16 +3,17 @@
 | 属性 | 内容 |
 |---|---|
 | 产品名称 | Safactory Job Server |
-| 文档版本 | v2.3 |
+| 文档版本 | v2.4 |
 | 文档状态 | Draft for Review |
-| 更新日期 | 2026-08-20 |
+| 更新日期 | 2026-08-26 |
 | 目标版本 | MVP / v1 |
 
 ## 1. 文档目的
 
 本文定义 Safactory Job Server 的产品边界、两级 RJob 调度方式、Gateway 与 Safactory 工作负载的启动顺序、按环境分组的 YAML/`dataset.jsonl` 管理、共享结果 mount、运行状态和查询数据链路。
 
-对外接口字段、路径、状态和错误响应以 [API_DESIGN.md](./API_DESIGN.md) 为准。
+对外接口字段、路径、状态和错误响应以已冻结的
+[API_DESIGN.md](./API_DESIGN.md) v1 契约为准。内部调度演进不得改变该契约。
 
 核心方案：
 
@@ -329,42 +330,81 @@ Safactory controller 为每次 episode 创建一个下游 RJob，至少包含：
 7. 从初始化 YAML 的 `gateway.config` 生成 Job 专属 `gateway.yaml`，并返回其 mount source、target 和 checksum；
 8. 提供按 `job_id` 查询输入绑定、环境组和结果目录的内部能力，供重启恢复和审计使用。
 
-### 9.2 `environments` 分组与 start config 配对
+### 9.2 配置驱动的 Environment Catalog 与 Range 计划
 
-agent config YAML 使用 Safactory 当前 `environments` 结构，只负责定义任务分组、dataset 和环境参数：
+环境调度的最终形态必须是配置驱动。Job Server 和 controller 都不得按 `range_id`、
+`env_name` 或目录名编写 `if/elif` 分支，也不得通过约定文件名猜测 runner。配置分为两层：
+
+1. **Environment Catalog** 注册环境的稳定 `environment_id`、受信任 adapter、agent config、
+   start config 和可选的 launcher RJob config；
+2. **Range Catalog** 只声明一个 `range_id` 选择哪些 `environment_id`、使用哪个 dataset，以及
+   允许覆盖的调度参数。
+
+目标 Environment Catalog 示例：
 
 ```yaml
+schema_version: "1.0"
 environments:
-  - env_name: <environment-name>
-    env_image: <trusted-environment-image>
-    env_num: <replica-count>
-    dataset: /mnt/safactory-job/groups/<env-name>/dataset.jsonl
-    env_params:
-      safactory_results_root: /app/results
+  - environment_id: cyberrange
+    adapter: safactory_launcher
+    agent_config: cyberrange/cyberrange_config.rjob.yaml
+    start_config: cyberrange/cyberrange_start.rjob.yaml
+
+  - environment_id: harbor
+    adapter: safactory_launcher
+    agent_config: harbor/harbor_vulhub_claude_kimi_all_config.rjob.yaml
+    start_config: harbor/harbor_vulhub_start.rjob.yaml
+    launcher_rjob_config: harbor/harbor_vulhub_rjob_config.yaml
 ```
 
-每个 `env_name` 必须关联一份 agent start config YAML。该文件定义 runner 和下游 RJob，其中 `rjob.mount_config` 指定结果 mount：
+目标 Range Catalog 示例：
 
 ```yaml
-agent_name: <environment-name>
-container:
-  runner_entrypoint:
-    source: <trusted-runner-source>
-    target: <runner-target>
-    command: <trusted-command>
-rjob:
-  mount_config:
-    - <result-storage-source>:/app/results
+schema_version: "2.0"
+ranges:
+  - range_id: range_security_mix_001
+    available: true
+    environment_runs:
+      - environment_id: cyberrange
+        dataset: cyberrange/datasets/cyberrange_smoke.jsonl
+        env_num: 1
+      - environment_id: harbor
+        dataset: harbor/datasets/harbor_cvebench_smoke.jsonl
+        env_num: 1
 ```
 
-约束如下：
+全局调度策略在初始化配置中声明，而不是写死在编排器：
 
-- `environments[]` 的一个条目定义一个环境组，而不是一个最终 worker；
-- `env_name` 必须与对应 start config 的 `agent_name` 一致；找不到、重复或不匹配时配置无效；
-- 每条 dataset 记录按其稳定 `task_idx` 形成一个逻辑任务组；`group_id` 由 `env_name + task_idx` 稳定派生；
-- `env_num` 表示该任务组的并行副本数；副本共享 `group_id`，但 `env_id`、`session_id` 和结果文件路径必须唯一；
-- 每个实际 episode 由 Safactory controller 创建为一个下游 RJob worker；
-- 调用方不能直接提交或覆盖 `env_image`、start config、`rjob.mount_config`、结果根目录或任意命令；这些字段必须由受信任模板生成或校验。
+```yaml
+safactory:
+  environment_scheduler:
+    strategy: parallel
+    max_parallel_environments: 2
+    fail_fast: true
+    max_attempts_per_environment: 1
+```
+
+Server 在接受 Job 后将两层配置解析成不可变 `ExecutionPlan`。计划至少包含
+`schema_version`、`job_id`、`range_id`、调度策略、按声明顺序排列的 environment runs、
+每个输入文件的 checksum 和预期 episode 数。controller 只消费该计划并按 allowlist 中的
+adapter 调度，不读取 Server 的 Range Catalog，也不自行扫描 `env/` 目录。
+
+每个 environment run 在计划中必须解析到单独的 agent config、start config、dataset 和结果
+命名空间。当前 launcher 的 `--agent-start-config` 是单值参数，因此多环境支持必须由 controller
+提供 execution-plan/manifest 入口，或由一个通用 dispatcher 为每个 environment run 调用一次
+launcher；不能把任意一个 start config 套用到全部 `environments[]`。
+
+运行约束如下：
+
+- `environment_id` 必须唯一且仅引用 Environment Catalog 中的条目；
+- `adapter` 必须来自服务端 allowlist，配置中不得提供任意 Python module、shell command 或 image；
+- `env_name` 必须与 start config 的 `agent_name` 一致；找不到、重复或不匹配时整个计划无效；
+- dataset 每条记录按 `environment_id + dataset checksum + task_idx` 派生稳定 `group_id`；
+- `env_num` 表示同一任务组的副本数；副本共享 `group_id`，但 `env_id`、`session_id` 和结果路径唯一；
+- 调度并发是 environment 级并发与 launcher 内 episode 并发的组合，必须在预检时计算并限制总上限；
+- 任一 environment run 失败时按 `fail_fast` 和重试策略处理；Job 只有在全部必需 run 完成且结果通过 barrier 后才能成功；
+- 调用方不能通过 API 覆盖 adapter、image、命令、mount、凭据或结果根目录；
+- 每个 environment run 的状态、attempt、下游 RJob 摘要和结果回收状态必须持久化，以支持 controller/Server 重启恢复。
 
 ### 9.3 文件映射
 
@@ -372,12 +412,16 @@ rjob:
 
 ```text
 range_id
-  -> agent_config_yaml_version
-  -> environment groups
-       -> dataset_version
+  -> Range Catalog version
+  -> environment runs
+       -> environment_id
+       -> Environment Catalog version
+       -> agent_config_yaml_version
        -> agent_start_config_yaml_version
-       -> trusted env image / episode RJob config / result mount
+       -> dataset_version
+       -> trusted adapter / episode RJob config / result mount
   -> create job_id binding
+       -> execution-plan.json
        -> rendered config.yaml
        -> groups/<env-group>/dataset.jsonl
        -> groups/<env-group>/start.rjob.yaml
@@ -805,7 +849,10 @@ sequenceDiagram
 - 六个 API 使用统一的真实 Catalog、SQLite Control DB 和 SDK 查询 repository；
 - Gateway ready 是提交 Safactory controller 的硬门槛；
 - Server 重启后根据持久化 RJob ID 继续对账；
-- 契约测试和 E2E 使用真实应用链路，仅对外部 RJob 与数据平台服务注入测试替身。
+- 契约测试和 E2E 使用真实应用链路，仅对外部 RJob 与数据平台服务注入测试替身；
+- 当前 `ranges.yaml` 仍直接保存 agent/dataset/start config 路径，且代码强制一个 Range 只有一个
+  environment group；9.2 的 Environment Catalog、ExecutionPlan 和多环境 dispatcher 是目标态，
+  未完成前不得宣称支持多环境调度。
 
 ## 19. 风险与决策
 
@@ -818,6 +865,9 @@ sequenceDiagram
 | mount 使用 Server 本地路径 | RJob 容器读取不到文件 | mount source 必须位于集群可访问共享存储。 |
 | Server 重启导致重复创建 RJob | 同一 Job 重复运行 | 持久化 RJob ID 并使用幂等名称；恢复时先查询后创建。 |
 | `env_name` 与 start config 不匹配 | 无法选择 runner 或下游 RJob 配置 | 文件发布前校验唯一配对关系。 |
+| Environment/Range Catalog 漂移 | 同一 `range_id` 在不同时间解析成不同 workload | 创建 Job 时生成带 checksum 的不可变 ExecutionPlan，恢复只读取计划快照。 |
+| 多环境并发叠加 | environment 并发乘以 episode 并发导致资源耗尽 | 调度配置分别限制两级并发，并在计划发布前校验总并发上限。 |
+| controller 不支持 execution-plan | 文档宣称多环境但运行时仍只能接收一个 start config | 启动预检校验 controller/launcher capability version，不满足时拒绝多环境 Range。 |
 | controller 与 worker 的结果 mount 不一致 | 下游成功但 Safactory 无法读取结果 | 两端 mount 同一 source，优先使用相同 target，并在提交前校验。 |
 | 多副本写入同一路径 | 结果相互覆盖或读取错配 | 结果路径包含 `job_id/session_id`，最终文件原子发布。 |
 | 下游 RJob 过早清理 | 结果尚未读取或失败现场丢失 | 结果回收和持久化完成后才允许清理。 |
@@ -831,9 +881,9 @@ sequenceDiagram
 2. Gateway 和 Safactory base image 的 registry 地址、版本策略及 entrypoint 分别是什么？
 3. RJob 平台返回的是稳定 DNS/Service，还是 worker IP；对应字段和生命周期如何？
 4. Gateway health/readiness endpoint、监听端口和成功判定是什么？
-5. agent config YAML 与各环境组 agent start config YAML 的准确 schema、版本关系、启动参数和容器内约定路径是什么？
-6. `dataset.jsonl` 是按 `range_id` 共享只读版本，还是每个 Job 都需要物化一份快照？
-7. `group_id` 是否继续严格按 `env_name + task_idx` 派生；dataset 更新后 `task_idx` 的稳定性如何保证？
+5. controller/launcher 从哪个版本开始提供 execution-plan/manifest capability，启动时如何查询该 capability？
+6. Environment Catalog 与 Range Catalog 由哪个发布系统签名、审核和原子切换？
+7. environment 级并发与 episode 级并发的集群配额上限分别是多少？
 8. 统一文件系统使用哪种 RJob 可访问存储，controller/episode 的 `mount_config` source、target 和读写权限分别是什么？
 9. 结果统一使用默认 `/app/results/<job_id>/<session_id>/result.json`，还是由 `SAFACTORY_RESULT_PATH` 显式指定；`SimulationStartResult` 的版本和校验 schema 是什么？
 10. Safactory controller 提交下游 RJob 所需凭据如何最小授权、轮换和限制到当前 Job？

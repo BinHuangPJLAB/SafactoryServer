@@ -8,6 +8,8 @@ from server.domain.entities import (
     CreatedJob,
     JobSessions,
     Model,
+    Range,
+    SessionMilestones,
     SessionResult,
     SessionSteps,
     StepTrajectory,
@@ -39,6 +41,10 @@ class JobService:
         models = await self._catalog.list_models()
         return tuple(model for model in models if model.available)
 
+    async def list_ranges(self) -> tuple[Range, ...]:
+        ranges = await self._catalog.list_ranges()
+        return tuple(range_config for range_config in ranges if range_config.available)
+
     async def create_job(self, model_id: str, range_id: str) -> CreatedJob:
         model = await self._catalog.get_model(model_id)
         if model is None:
@@ -62,6 +68,12 @@ class JobService:
 
     async def get_result(self, job_id: str, session_id: str) -> SessionResult:
         return await self._runtime.get_result(job_id, session_id)
+
+    async def get_milestones(
+        self, job_id: str, session_id: str
+    ) -> SessionMilestones:
+        result = await self._runtime.get_milestones(job_id, session_id)
+        return replace(result, snapshot=_redact_sensitive_values(result.snapshot))
 
     async def get_steps(self, job_id: str, session_id: str) -> SessionSteps:
         return await self._runtime.get_steps(job_id, session_id)

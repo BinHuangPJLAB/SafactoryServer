@@ -4,7 +4,7 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v2.6 |
+| 文档版本 | v2.7 |
 | 文档状态 | Frozen |
 | 更新日期 | 2026-08-31 |
 | Base Path | `/v1` |
@@ -45,9 +45,10 @@ sequenceDiagram
     participant Client as 调用方
     participant Base as 基座 API
 
+    Client->>Base: GET /v1/ranges
+    Base-->>Client: 可用 range_id 和 description
     Client->>Base: GET /v1/models
     Base-->>Client: 可用 model_id
-    Note over Client,Base: 调用方取得基座提供的 range_id
     Client->>Base: POST /v1/jobs (model_id + range_id)
     Base-->>Client: job_id
     Client->>Base: GET /v1/jobs/sessions?job_id=...
@@ -66,13 +67,14 @@ sequenceDiagram
 
 | 顺序 | Method | Path | 用途 |
 |---:|---|---|---|
-| 1 | GET | `/v1/models` | 查询基座支持的模型 |
-| 2 | POST | `/v1/jobs` | 选择模型和靶场并创建 Job |
-| 3 | GET | `/v1/jobs/sessions` | 使用 query 参数 `job_id` 查询 Session ID 列表 |
-| 4 | GET | `/v1/sessions/result` | 使用 query 参数 `job_id`、`session_id` 查询运行结果（得分） |
-| 5 | GET | `/v1/sessions/steps` | 使用 query 参数 `job_id`、`session_id` 查询轨迹 step 数和 Step ID |
-| 6 | GET | `/v1/sessions/steps/trajectory` | 使用 query 参数 `job_id`、`session_id`、`step_id` 查询某一步具体轨迹 |
-| 7 | GET | `/v1/sessions/milestones` | 使用 query 参数 `job_id`、`session_id` 查询环境支持的里程碑进度 |
+| 1 | GET | `/v1/ranges` | 查询可用于创建 Job 的 Range |
+| 2 | GET | `/v1/models` | 查询基座支持的模型 |
+| 3 | POST | `/v1/jobs` | 选择模型和靶场并创建 Job |
+| 4 | GET | `/v1/jobs/sessions` | 使用 query 参数 `job_id` 查询 Session ID 列表 |
+| 5 | GET | `/v1/sessions/result` | 使用 query 参数 `job_id`、`session_id` 查询运行结果（得分） |
+| 6 | GET | `/v1/sessions/steps` | 使用 query 参数 `job_id`、`session_id` 查询轨迹 step 数和 Step ID |
+| 7 | GET | `/v1/sessions/steps/trajectory` | 使用 query 参数 `job_id`、`session_id`、`step_id` 查询某一步具体轨迹 |
+| 8 | GET | `/v1/sessions/milestones` | 使用 query 参数 `job_id`、`session_id` 查询环境支持的里程碑进度 |
 
 ## 3. 通用约定
 
@@ -596,7 +598,48 @@ HTTP/1.1 422 Unprocessable Content
 | 422 | `MILESTONES_NOT_SUPPORTED` | 目标环境不支持 milestone；不可重试 |
 | 503 | `MILESTONES_UNAVAILABLE` | 快照暂时不可读取或内容无效；可重试 |
 
-## 11. 稳定错误码
+## 11. 查询可用 Range
+
+### `GET /v1/ranges`
+
+返回当前可用于创建 Job 的 `range_id` 及其用途说明。接口无请求参数。
+
+```http
+GET /v1/ranges HTTP/1.1
+Authorization: Bearer <api-key>
+```
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: no-store
+```
+
+```json
+[
+  {
+    "range_id": "range_cyberrange_smoke_001",
+    "description": "CyberRange Range 3 冒烟验证，用于快速检查运行链路"
+  },
+  {
+    "range_id": "range_cyberrange_full_001",
+    "description": "CyberRange Range 3 至 Range 6 完整攻防评测"
+  }
+]
+```
+
+接口只返回 `available=true` 的 Range，并保持 `ranges.yaml` 中的声明顺序；没有可用
+Range 时返回空数组。
+
+### 状态码
+
+| HTTP | Error code | 说明 |
+|---:|---|---|
+| 200 | — | 成功返回 Range 列表，列表可能为空 |
+| 403 | `FORBIDDEN` | 认证凭据缺失或无效 |
+| 503 | `DEPENDENCY_UNAVAILABLE` | Range Catalog 不可读取或内容不合法 |
+| 500 | `INTERNAL_ERROR` | 未分类的服务端错误 |
+
+## 12. 稳定错误码
 
 | Error code | HTTP | Retryable | 说明 |
 |---|---:|---:|---|
@@ -615,14 +658,15 @@ HTTP/1.1 422 Unprocessable Content
 | `DEPENDENCY_UNAVAILABLE` | 503 | 是 | 模型配置、Range Catalog、执行引擎或存储暂不可用 |
 | `INTERNAL_ERROR` | 500 | 是 | 未分类的服务端错误 |
 
-## 12. 闭环验收标准
+## 13. 闭环验收标准
 
 使用一组有效的 `model_id` 和 `range_id`，调用方必须能够完成以下流程：
 
-1. 从模型接口取得 `model_id`；
-2. 创建 Job 并取得 `job_id`；
-3. 轮询 Job 的 Session 列表接口，取得 `session_ids` 列表；
-4. 对列表中的每个 `session_id`，使用 `job_id + session_id` 查询运行结果并在完成后取得得分；
-5. 对列表中的每个 `session_id`，使用 `job_id + session_id` 查询 `step_count` 和全部可用 `step_id`；
-6. 对每个 `step_id`，使用 `job_id + session_id + step_id` 查询对应的具体轨迹；
-7. 对每个 Session，当 `sealed=true` 时，已查询到的 step 数量必须等于 `step_count`，且每个 Step 均可获取唯一的轨迹详情。
+1. 从 Range 接口取得 `range_id`；
+2. 从模型接口取得 `model_id`；
+3. 创建 Job 并取得 `job_id`；
+4. 轮询 Job 的 Session 列表接口，取得 `session_ids` 列表；
+5. 对列表中的每个 `session_id`，使用 `job_id + session_id` 查询运行结果并在完成后取得得分；
+6. 对列表中的每个 `session_id`，使用 `job_id + session_id` 查询 `step_count` 和全部可用 `step_id`；
+7. 对每个 `step_id`，使用 `job_id + session_id + step_id` 查询对应的具体轨迹；
+8. 对每个 Session，当 `sealed=true` 时，已查询到的 step 数量必须等于 `step_count`，且每个 Step 均可获取唯一的轨迹详情。

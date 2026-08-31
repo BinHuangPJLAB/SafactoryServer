@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from server.auth.context import get_authenticated_username, get_request_id
 from server.domain.entities import (
@@ -9,6 +12,8 @@ from server.domain.entities import (
     FailureInfo,
     JobSessions,
     JobStatus,
+    MilestoneStatus,
+    SessionMilestones,
     SessionResult,
     SessionSteps,
     StepTrajectory,
@@ -22,8 +27,19 @@ from server.infrastructure.real.control_store import (
     new_control_job,
 )
 from server.infrastructure.real.data_platform import DataPlatformError, DataPlatformRepository
+from server.infrastructure.real.file_manager import (
+    SAFE_NAME,
+    FileBindingError,
+    JobFileBinding,
+)
 
 LOGGER = logging.getLogger("server.data_queries")
+MILESTONES_FILENAME = "milestones.json"
+MAX_MILESTONES_BYTES = 1024 * 1024
+
+
+class MilestoneSnapshotError(RuntimeError):
+    """A published milestone snapshot is unsafe or invalid."""
 
 
 class RealRuntimeRepository:
@@ -124,6 +140,79 @@ class RealRuntimeRepository:
             )
         return result
 
+    async def get_milestones(
+        self, job_id: str, session_id: str
+    ) -> SessionMilestones:
+        job = await self._require_job(job_id)
+        try:
+            range_config = self._catalog.resolve_range(job.range_id)
+        except TrustedConfigError as exc:
+            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE) from exc
+        if range_config is None:
+            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        if not all(group.supports_milestones for group in range_config.groups):
+            raise DomainError(
+                ErrorCode.MILESTONES_NOT_SUPPORTED,
+                {"job_id": job_id, "session_id": session_id},
+            )
+        if not SAFE_NAME.fullmatch(session_id):
+            raise DomainError(ErrorCode.INVALID_REQUEST, {"fields": ["session_id"]})
+
+        LOGGER.info(
+            "job_id=%s session_id=%s operation=get_milestones", job_id, session_id
+        )
+        snapshot = None
+        if job.binding_json is not None:
+            try:
+                binding = JobFileBinding.from_json(job.binding_json)
+                snapshot = await asyncio.to_thread(
+                    _read_milestone_snapshot,
+                    Path(binding.result_local_path),
+                    job_id,
+                    session_id,
+                )
+            except (
+                FileBindingError,
+                json.JSONDecodeError,
+                KeyError,
+                MilestoneSnapshotError,
+                TypeError,
+            ) as exc:
+                raise DomainError(
+                    ErrorCode.MILESTONES_UNAVAILABLE,
+                    {"job_id": job_id, "session_id": session_id},
+                ) from exc
+        if snapshot is not None:
+            return SessionMilestones(
+                job_id,
+                session_id,
+                MilestoneStatus.AVAILABLE,
+                snapshot,
+            )
+
+        try:
+            session_ids = await self._data.list_session_ids(job_id)
+        except DataPlatformError as exc:
+            await self._query_failed(job_id, "get_milestones")
+            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE) from exc
+        if session_id not in session_ids:
+            raise DomainError(
+                ErrorCode.SESSION_NOT_FOUND,
+                {"job_id": job_id, "session_id": session_id},
+            )
+        if job.terminal:
+            raise DomainError(
+                ErrorCode.MILESTONES_NOT_FOUND,
+                {"job_id": job_id, "session_id": session_id},
+            )
+        return SessionMilestones(
+            job_id,
+            session_id,
+            MilestoneStatus.PENDING,
+            None,
+            self._retry_after_seconds,
+        )
+
     async def get_steps(self, job_id: str, session_id: str) -> SessionSteps:
         await self._require_job(job_id)
         LOGGER.info("job_id=%s session_id=%s operation=get_steps", job_id, session_id)
@@ -187,3 +276,26 @@ class RealRuntimeRepository:
             self._clock.now(),
             {"operation": operation},
         )
+
+
+def _read_milestone_snapshot(
+    result_local_path: Path, job_id: str, session_id: str
+) -> dict[str, object] | None:
+    job_directory = result_local_path / job_id
+    session_directory = job_directory / session_id
+    path = session_directory / MILESTONES_FILENAME
+    if not path.exists():
+        return None
+    if any(item.is_symlink() for item in (job_directory, session_directory, path)):
+        raise MilestoneSnapshotError("milestone path must not contain symlinks")
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_MILESTONES_BYTES:
+            raise MilestoneSnapshotError("milestone snapshot is not a regular bounded file")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MilestoneSnapshotError("milestone snapshot is unreadable") from exc
+    if not isinstance(raw, dict) or raw.get("schema_version") != "agent-range.milestones/v1":
+        raise MilestoneSnapshotError("milestone snapshot schema is unsupported")
+    return raw
