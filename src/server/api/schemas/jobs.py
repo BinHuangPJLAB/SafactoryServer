@@ -21,9 +21,14 @@ class CreatedJobResponse(ApiModel):
     created_at: UtcTimestamp
 
 
+class CloseJobResponse(ApiModel):
+    job_id: str
+    job_status: JobStatus
+    updated_at: UtcTimestamp
+
+
 class JobSessionsResponse(ApiModel):
     job_id: str
     job_status: JobStatus
     session_ids: list[str]
     error: OptionalFailure = Field(default=None, exclude_if=lambda value: value is None)
-

@@ -4,14 +4,13 @@
 |---|---|
 | API 名称 | Safactory Job API |
 | API 版本 | v1 |
-| 文档版本 | v2.8 |
+| 文档版本 | v2.9 |
 | 文档状态 | Frozen |
-| 更新日期 | 2026-08-31 |
+| 更新日期 | 2026-09-03 |
 | Base Path | `/v1` |
 
-本版本是 v1 的冻结契约。既有 Method、Path、请求字段、响应字段、字段类型、状态语义和
-错误码不得做不兼容修改；不兼容需求必须发布新的 API 大版本。仅修正文案、补充不改变
-调用方行为的说明，不构成协议变更。
+本版本将主动关闭 Job 纳入 v1 生命周期，并将 `closing`、`closed` 纳入 `job_status`。
+v2.9 是新的 v1 冻结契约；后续不兼容需求必须发布新的 API 大版本。
 
 ## 1. 设计范围
 
@@ -22,9 +21,10 @@
 3. 使用 `job_id` 查询 `session_id` 列表；
 4. 使用 `job_id` 和列表中的 `session_id` 查询运行结果（得分）；
 5. 使用 `job_id` 和列表中的 `session_id` 查询轨迹 step 数及 `step_id`；
-6. 使用 `job_id`、`session_id` 和 `step_id` 查询某一步的具体轨迹。
+6. 使用 `job_id`、`session_id` 和 `step_id` 查询某一步的具体轨迹；
+7. 使用 `job_id` 主动关闭尚未结束的 Job。
 
-不在本文中定义 Job 列表、Task、暂停、恢复、取消、删除、Artifact、日志、事件推送和靶场模板管理接口。
+不在本文中定义 Job 列表、Task、暂停、恢复、删除、Artifact、日志、事件推送和靶场模板管理接口。
 
 ### 1.1 核心约束
 
@@ -36,7 +36,8 @@
 - ID 均为不透明字符串，调用方不得解析或自行拼接 ID；
 - 创建 Job 后的所有查询都必须携带 `job_id`，服务端必须校验 Session、Step 与 Job 的归属关系；
 - 所有接口都需要 Bearer API Key；Job 只对创建它的认证用户可见，跨用户查询统一按资源不存在处理；
-- Job 异步运行，`session_id` 列表、得分和轨迹均可能暂未生成，调用方应按本文约定轮询。
+- Job 异步运行，`session_id` 列表、得分和轨迹均可能暂未生成，调用方应按本文约定轮询；
+- Close 是异步、幂等操作，只终止运行并清理资源，不删除已持久化的 Session、结果和轨迹。
 
 ## 2. 调用流程
 
@@ -61,6 +62,12 @@ sequenceDiagram
         Client->>Base: GET /v1/sessions/steps/trajectory?job_id=...&session_id=...&step_id=...
         Base-->>Client: 指定 step 的具体轨迹
     end
+    opt 主动关闭未结束的 Job
+        Client->>Base: POST /v1/jobs/close?job_id=...
+        Base-->>Client: job_status=closing
+        Client->>Base: GET /v1/jobs/sessions?job_id=...
+        Base-->>Client: job_status=closed
+    end
 ```
 
 接口总览：
@@ -70,11 +77,12 @@ sequenceDiagram
 | 1 | GET | `/v1/ranges` | 查询可用于创建 Job 的 Range |
 | 2 | GET | `/v1/models` | 查询基座支持的模型 |
 | 3 | POST | `/v1/jobs` | 选择模型和靶场并创建 Job |
-| 4 | GET | `/v1/jobs/sessions` | 使用 query 参数 `job_id` 查询 Session ID 列表 |
-| 5 | GET | `/v1/sessions/result` | 使用 query 参数 `job_id`、`session_id` 查询运行结果（得分） |
-| 6 | GET | `/v1/sessions/steps` | 使用 query 参数 `job_id`、`session_id` 查询轨迹 step 数和 Step ID |
-| 7 | GET | `/v1/sessions/steps/trajectory` | 使用 query 参数 `job_id`、`session_id`、`step_id` 查询某一步具体轨迹 |
-| 8 | GET | `/v1/sessions/milestones` | 使用 query 参数 `job_id`、`session_id` 查询环境支持的里程碑进度 |
+| 4 | POST | `/v1/jobs/close` | 使用 query 参数 `job_id` 主动关闭 Job |
+| 5 | GET | `/v1/jobs/sessions` | 使用 query 参数 `job_id` 查询 Session ID 列表 |
+| 6 | GET | `/v1/sessions/result` | 使用 query 参数 `job_id`、`session_id` 查询运行结果（得分） |
+| 7 | GET | `/v1/sessions/steps` | 使用 query 参数 `job_id`、`session_id` 查询轨迹 step 数和 Step ID |
+| 8 | GET | `/v1/sessions/steps/trajectory` | 使用 query 参数 `job_id`、`session_id`、`step_id` 查询某一步具体轨迹 |
+| 9 | GET | `/v1/sessions/milestones` | 使用 query 参数 `job_id`、`session_id` 查询环境支持的里程碑进度 |
 
 ## 3. 通用约定
 
@@ -126,14 +134,33 @@ Authorization: Bearer <api-key>
 
 | HTTP 状态码 | 说明 |
 |---:|---|
-| 200 | 查询成功 |
-| 202 | Job 创建请求已接受 |
+| 200 | 查询成功，或关闭操作无需异步处理 |
+| 202 | Job 创建或关闭请求已接受 |
 | 400 | 请求格式或参数格式错误 |
 | 403 | 认证凭据缺失或无效 |
 | 404 | 指定资源不存在 |
 | 422 | 请求语义无效，或目标环境不支持所请求的能力 |
 | 500 | 未分类的服务端错误 |
 | 503 | Range Catalog、执行引擎或数据存储暂不可用 |
+
+### 3.5 Job 生命周期
+
+Job 的正常生命周期为：
+
+```text
+queued → preparing → running → succeeded
+                            ↘ failed
+```
+
+调用 close 后的生命周期为：
+
+```text
+queued / preparing / running → closing → closed
+```
+
+`succeeded`、`failed` 和 `closed` 是终态。`closed` 表示用户主动关闭且运行资源已确认清理完成；
+一旦进入 `closing`，Job 不得再回到运行状态或转为自然成功。对已进入终态的 Job 调用 close
+是幂等操作，并保留原终态。
 
 ## 4. 查询基座支持的模型
 
@@ -238,7 +265,82 @@ Location: /v1/jobs/sessions?job_id=job_01K2XYZ...
 | `RANGE_NOT_AVAILABLE` | 422 | 靶场模板当前不可用 |
 | `DEPENDENCY_UNAVAILABLE` | 503 | 模型配置、Range Catalog 或执行依赖暂不可用 |
 
-## 6. 使用 Job ID 查询 Session ID 列表
+## 6. 关闭 Job
+
+### `POST /v1/jobs/close`
+
+主动关闭尚未结束的 Job。接口先持久化关闭请求并将 `job_status` 设置为 `closing`，再由后台
+按 episode RJob、Safactory controller、Gateway 的顺序清理运行资源。
+
+### Query parameters
+
+| 参数 | 类型 | 必需 | 说明 |
+|---|---|---:|---|
+| `job_id` | string | 是 | 要关闭的 Job ID |
+
+请求示例：
+
+```http
+POST /v1/jobs/close?job_id=job_01K2XYZ... HTTP/1.1
+Authorization: Bearer <api-key>
+```
+
+### Response：关闭请求已接受
+
+```http
+HTTP/1.1 202 Accepted
+Location: /v1/jobs/sessions?job_id=job_01K2XYZ...
+Retry-After: 2
+```
+
+```json
+{
+  "job_id": "job_01K2XYZ...",
+  "job_status": "closing",
+  "updated_at": "2026-09-03T08:30:00Z"
+}
+```
+
+调用方应根据 `Location` 轮询 Job；资源清理完成后，`job_status` 变为 `closed`。
+
+### Response：已关闭或已自然结束
+
+```http
+HTTP/1.1 200 OK
+```
+
+```json
+{
+  "job_id": "job_01K2XYZ...",
+  "job_status": "closed",
+  "updated_at": "2026-09-03T08:30:08Z"
+}
+```
+
+重复关闭 `closing` Job 返回 `202` 和当前状态；关闭 `closed` Job 返回 `200`。对
+`succeeded` 或 `failed` Job 调用本接口也返回 `200`，并保留原 `job_status`。
+
+字段说明：
+
+| 字段 | 类型 | 必有 | 说明 |
+|---|---|---:|---|
+| `job_id` | string | 是 | Job ID |
+| `job_status` | string | 是 | 当前 Job 状态 |
+| `updated_at` | string | 是 | 本次状态更新时间，UTC RFC 3339 |
+
+### 状态码
+
+| HTTP | Error code/状态 | 说明 |
+|---:|---|---|
+| 200 | `closed`/原终态 | Job 已关闭，或已自然结束，无需再次关闭 |
+| 202 | `closing` | 关闭请求已持久化，资源正在清理 |
+| 400 | `INVALID_REQUEST` | `job_id` 缺失或格式错误 |
+| 403 | `FORBIDDEN` | 认证凭据缺失或无效 |
+| 404 | `JOB_NOT_FOUND` | Job 不存在或不属于当前用户 |
+| 503 | `DEPENDENCY_UNAVAILABLE` | 关闭请求无法持久化 |
+| 500 | `INTERNAL_ERROR` | 未分类的服务端错误 |
+
+## 7. 使用 Job ID 查询 Session ID 列表
 
 ### `GET /v1/jobs/sessions`
 
@@ -293,18 +395,18 @@ HTTP/1.1 200 OK
 | 字段 | 类型 | 必有 | 说明 |
 |---|---|---:|---|
 | `job_id` | string | 是 | Job ID |
-| `job_status` | string | 是 | `queued`、`preparing`、`running`、`succeeded` 或 `failed` |
+| `job_status` | string | 是 | `queued`、`preparing`、`running`、`closing`、`succeeded`、`failed` 或 `closed` |
 | `session_ids` | array | 是 | 当前 Job 关联的 Session ID 字符串列表；尚未创建或创建失败时为空列表 |
 | `error` | object | 否 | `job_status=failed` 时的失败原因 |
 
 约束：
 
-- `session_ids` 为空且 Job 未失败时，调用方可根据 `Retry-After` 继续轮询；
+- `job_status` 为 `queued`、`preparing`、`running` 或 `closing` 时，调用方可根据 `Retry-After` 继续轮询；
 - 同一个 `job_id` 可返回多个 Session ID，列表中不得包含重复项；
 - Job 进入终态前，`session_ids` 可追加新值，但已返回的 Session ID 不得变更或移除；Job 进入终态后，列表不得再变更；
 - Job 不存在时返回 `404 JOB_NOT_FOUND`。
 
-## 7. 使用 Session ID 查询结果（得分）
+## 8. 使用 Session ID 查询结果（得分）
 
 ### `GET /v1/sessions/result`
 
@@ -405,7 +507,7 @@ HTTP/1.1 200 OK
 
 结果尚未完成时返回 200 和空得分，调用方可根据 `Retry-After` 继续轮询。
 
-## 8. 使用 Session ID 查询轨迹 step
+## 9. 使用 Session ID 查询轨迹 step
 
 ### `GET /v1/sessions/steps`
 
@@ -471,7 +573,7 @@ HTTP/1.1 200 OK
 - 已返回的 `step_id` 及其 `sequence_no` 不得变化或被复用；
 - Job 不存在时返回 `404 JOB_NOT_FOUND`；Session 不存在或不属于指定 Job 时返回 `404 SESSION_NOT_FOUND`。
 
-## 9. 使用 Session ID 和 Step ID 查询具体轨迹
+## 10. 使用 Session ID 和 Step ID 查询具体轨迹
 
 ### `GET /v1/sessions/steps/trajectory`
 
@@ -535,7 +637,7 @@ HTTP/1.1 200 OK
 
 服务端必须过滤密钥、鉴权信息、宿主机路径等敏感数据。不存在的 `job_id` 返回 `404 JOB_NOT_FOUND`；`session_id` 不存在或不属于指定 Job 时返回 `404 SESSION_NOT_FOUND`；`step_id` 不存在或不属于该 Session 时统一返回 `404 STEP_NOT_FOUND`，不得返回其他 Job 或 Session 的轨迹。
 
-## 10. 查询 Session 里程碑
+## 11. 查询 Session 里程碑
 
 ### `GET /v1/sessions/milestones`
 
@@ -637,7 +739,7 @@ HTTP/1.1 422 Unprocessable Content
 | 422 | `MILESTONES_NOT_SUPPORTED` | 目标环境不支持 milestone；不可重试 |
 | 503 | `MILESTONES_UNAVAILABLE` | 快照暂时不可读取或内容无效；可重试 |
 
-## 11. 查询可用 Range
+## 12. 查询可用 Range
 
 ### `GET /v1/ranges`
 
@@ -678,7 +780,7 @@ Range 时返回空数组。
 | 503 | `DEPENDENCY_UNAVAILABLE` | Range Catalog 不可读取或内容不合法 |
 | 500 | `INTERNAL_ERROR` | 未分类的服务端错误 |
 
-## 12. 稳定错误码
+## 13. 稳定错误码
 
 | Error code | HTTP | Retryable | 说明 |
 |---|---:|---:|---|
@@ -697,7 +799,7 @@ Range 时返回空数组。
 | `DEPENDENCY_UNAVAILABLE` | 503 | 是 | 模型配置、Range Catalog、执行引擎或存储暂不可用 |
 | `INTERNAL_ERROR` | 500 | 是 | 未分类的服务端错误 |
 
-## 13. 闭环验收标准
+## 14. 闭环验收标准
 
 使用一组有效的 `model_id` 和 `range_id`，调用方必须能够完成以下流程：
 
@@ -709,3 +811,4 @@ Range 时返回空数组。
 6. 对列表中的每个 `session_id`，使用 `job_id + session_id` 查询 `step_count` 和全部可用 `step_id`；
 7. 对每个 `step_id`，使用 `job_id + session_id + step_id` 查询对应的具体轨迹；
 8. 对每个 Session，当 `sealed=true` 时，已查询到的 step 数量必须等于 `step_count`，且每个 Step 均可获取唯一的轨迹详情。
+9. 对尚未结束的 Job 调用 close 后，能够观察到 `closing → closed`，且已有 Session、结果和轨迹仍可查询。

@@ -21,6 +21,13 @@ def test_missing_query_parameter_is_invalid_request(client: TestClient) -> None:
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
+def test_missing_close_job_id_is_invalid_request(client: TestClient) -> None:
+    response = client.post("/v1/jobs/close")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
 def test_malformed_json_is_invalid_request(client: TestClient) -> None:
     response = client.post(
         "/v1/jobs",

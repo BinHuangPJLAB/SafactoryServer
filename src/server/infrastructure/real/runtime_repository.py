@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 from server.auth.context import get_authenticated_username, get_request_id
 from server.domain.entities import (
+    CloseJobResult,
     CreatedJob,
     FailureInfo,
     JobSessions,
@@ -26,6 +28,7 @@ from server.infrastructure.real.configuration import RealCatalog, TrustedConfigE
 from server.infrastructure.real.control_store import (
     SQLiteControlStore,
     new_control_job,
+    parse_timestamp,
 )
 from server.infrastructure.real.data_platform import DataPlatformError, DataPlatformRepository
 from server.infrastructure.real.file_manager import (
@@ -102,6 +105,37 @@ class RealRuntimeRepository:
         )
         self._wake_orchestrator()
         return CreatedJob(job_id, JobStatus.QUEUED, model_id, range_id, created_at)
+
+    async def close_job(self, job_id: str) -> CloseJobResult:
+        now = self._clock.now()
+        try:
+            await self._require_job(job_id)
+            job, transitioned = await self._store.request_close(job_id, now=now)
+            if transitioned:
+                await self._store.add_event(
+                    job_id,
+                    "job_close_requested",
+                    job.phase,
+                    now,
+                    {"requested_by": get_authenticated_username() or "system"},
+                )
+        except KeyError as exc:  # pragma: no cover - jobs are not deleted
+            raise DomainError(ErrorCode.JOB_NOT_FOUND, {"job_id": job_id}) from exc
+        except sqlite3.Error as exc:
+            raise DomainError(ErrorCode.DEPENDENCY_UNAVAILABLE) from exc
+
+        status = JobStatus(job.status)
+        retry_after = (
+            self._retry_after_seconds if status == JobStatus.CLOSING else None
+        )
+        if status == JobStatus.CLOSING:
+            self._wake_orchestrator()
+        return CloseJobResult(
+            job_id=job.job_id,
+            job_status=status,
+            updated_at=parse_timestamp(job.updated_at),
+            retry_after_seconds=retry_after,
+        )
 
     async def list_sessions(self, job_id: str) -> JobSessions:
         job = await self._require_job(job_id)

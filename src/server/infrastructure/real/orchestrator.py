@@ -18,7 +18,12 @@ from server.infrastructure.real.configuration import (
     RealCatalog,
     TrustedConfigError,
 )
-from server.infrastructure.real.control_store import ControlJob, SQLiteControlStore, parse_timestamp
+from server.infrastructure.real.control_store import (
+    ControlJob,
+    JobStateConflict,
+    SQLiteControlStore,
+    parse_timestamp,
+)
 from server.infrastructure.real.file_manager import (
     FileBindingError,
     JobFileBinding,
@@ -135,6 +140,11 @@ class RealJobOrchestrator:
                     )
                 ):
                     await self._fail(job.job_id, "DEPENDENCY_UNAVAILABLE")
+            except JobStateConflict:
+                LOGGER.info(
+                    "job_id=%s event=execution_stopped_for_close",
+                    job.job_id,
+                )
             except Exception:
                 LOGGER.exception(
                     "job_id=%s phase=%s unexpected_reconciliation_error",
@@ -161,21 +171,35 @@ class RealJobOrchestrator:
             now=self._clock.now(),
             orchestrator_attempt=job.orchestrator_attempt + 1,
         )
+        if job.status == JobStatus.CLOSING.value:
+            return
         await self._event(job, "rjob_reconciliation_started")
 
         if job.binding_json is None:
             job = await self._bind_files(job)
-            if job.terminal:
+            if job.terminal or job.status == JobStatus.CLOSING.value:
                 return
 
         binding = JobFileBinding.from_json(job.binding_json)
+        latest = await self._store.get(job.job_id)
+        if latest is None:  # pragma: no cover - jobs are not deleted
+            return
+        job = latest
+        if job.status == JobStatus.CLOSING.value:
+            return
         if job.gateway_rjob_id is None:
             job = await self._submit_gateway(job, binding)
-            if job.terminal or job.gateway_rjob_id is None:
+            if (
+                job.terminal
+                or job.status == JobStatus.CLOSING.value
+                or job.gateway_rjob_id is None
+            ):
                 return
 
         gateway = await self._rjobs.get(job.gateway_rjob_id)
         job = await self._record_gateway_status(job, gateway)
+        if job.status == JobStatus.CLOSING.value:
+            return
         if gateway.state in {RJobState.FAILED, RJobState.CANCELLED, RJobState.SUCCEEDED}:
             await self._fail(job.job_id, "GATEWAY_RJOB_FAILED")
             return
@@ -191,7 +215,16 @@ class RealJobOrchestrator:
         gateway_url = _gateway_url(
             self._settings.gateway_scheme, gateway.address, gateway.port
         )
-        if not await self._health.ready(gateway_url, self._settings.gateway_health_path):
+        gateway_ready = await self._health.ready(
+            gateway_url, self._settings.gateway_health_path
+        )
+        latest = await self._store.get(job.job_id)
+        if latest is None:  # pragma: no cover - jobs are not deleted
+            return
+        job = latest
+        if job.status == JobStatus.CLOSING.value:
+            return
+        if not gateway_ready:
             if job.safactory_rjob_id is not None:
                 await self._fail(job.job_id, "GATEWAY_LOST_DURING_RUN")
                 return
@@ -218,10 +251,20 @@ class RealJobOrchestrator:
                 gateway_ready_at=_timestamp(self._clock.now()),
                 phase="submitting_safactory_rjob",
             )
+            if job.status == JobStatus.CLOSING.value:
+                return
             await self._event(job, "gateway_rjob_ready")
 
+        latest = await self._store.get(job.job_id)
+        if latest is None:  # pragma: no cover - jobs are not deleted
+            return
+        job = latest
+        if job.status == JobStatus.CLOSING.value:
+            return
         if job.safactory_rjob_id is None:
             job = await self._submit_safactory(job, binding)
+            if job.status == JobStatus.CLOSING.value:
+                return
 
         # Gateway availability remains a hard invariant for the controller lifetime.
         if gateway.state != RJobState.RUNNING or not gateway.ready:
@@ -230,6 +273,8 @@ class RealJobOrchestrator:
 
         controller = await self._rjobs.get(job.safactory_rjob_id)
         job = await self._record_controller_status(job, controller)
+        if job.status == JobStatus.CLOSING.value:
+            return
         if controller.state == RJobState.SUCCEEDED:
             if not self._results_complete(binding, controller):
                 await self._fail(job.job_id, "EPISODE_RESULTS_INCOMPLETE")
@@ -460,15 +505,26 @@ class RealJobOrchestrator:
         )
         rjob_id = await self._rjobs.create(spec)
         now = self._clock.now()
-        job = await self._store.update(
-            job.job_id,
-            now=now,
-            safactory_rjob_id=rjob_id,
-            safactory_status=RJobState.PENDING.value,
-            status=JobStatus.RUNNING.value,
-            phase="running_safactory",
-            started_at=job.started_at or _timestamp(now),
-        )
+        try:
+            job = await self._store.update(
+                job.job_id,
+                now=now,
+                safactory_rjob_id=rjob_id,
+                safactory_status=RJobState.PENDING.value,
+                status=JobStatus.RUNNING.value,
+                phase="running_safactory",
+                started_at=job.started_at or _timestamp(now),
+            )
+        except JobStateConflict:
+            # Close may win while the external create call is in flight. Persist the
+            # returned RJob ID so the close reconciler can still remove it.
+            job = await self._store.update(
+                job.job_id,
+                now=now,
+                safactory_rjob_id=rjob_id,
+                safactory_status=RJobState.PENDING.value,
+                started_at=job.started_at or _timestamp(now),
+            )
         await self._event(job, "safactory_rjob_submitted", {"rjob_id": rjob_id})
         return job
 
@@ -504,24 +560,37 @@ class RealJobOrchestrator:
 
     async def _fail(self, job_id: str, reason: str) -> None:
         job = await self._store.get(job_id)
-        if job is None or job.status == JobStatus.SUCCEEDED.value:
+        if job is None or job.status in {
+            JobStatus.SUCCEEDED.value,
+            JobStatus.CLOSING.value,
+            JobStatus.CLOSED.value,
+        }:
             return
         if job.status != JobStatus.FAILED.value:
             now = self._clock.now()
-            job = await self._store.update(
-                job_id,
-                now=now,
-                status=JobStatus.FAILED.value,
-                phase="cleaning_rjobs",
-                status_reason=reason,
-                completed_at=_timestamp(now),
-                cleanup_requested=1,
-            )
+            try:
+                job = await self._store.update(
+                    job_id,
+                    now=now,
+                    status=JobStatus.FAILED.value,
+                    phase="cleaning_rjobs",
+                    status_reason=reason,
+                    completed_at=_timestamp(now),
+                    cleanup_requested=1,
+                )
+            except JobStateConflict:
+                return
             await self._event(job, "job_failed", {"reason": reason})
         await self._cleanup(job)
 
     async def _cleanup(self, job: ControlJob) -> None:
-        if self._settings.keep_rjobs:
+        latest = await self._store.get(job.job_id)
+        if latest is None:  # pragma: no cover - jobs are not deleted
+            return
+        job = latest
+        closing = job.status == JobStatus.CLOSING.value
+
+        if self._settings.keep_rjobs and not closing:
             await self._store.update(
                 job.job_id,
                 now=self._clock.now(),
@@ -551,12 +620,19 @@ class RealJobOrchestrator:
         except RJobDependencyError:
             LOGGER.warning("job_id=%s cleanup_retry_pending", job.job_id)
             return
-        await self._store.update(
-            job.job_id,
-            now=self._clock.now(),
-            cleanup_requested=0,
-        )
+        now = self._clock.now()
+        changes: dict[str, object] = {"cleanup_requested": 0}
+        if closing:
+            changes.update(
+                status=JobStatus.CLOSED.value,
+                phase="completed",
+                completed_at=_timestamp(now),
+                status_reason=None,
+            )
+        job = await self._store.update(job.job_id, now=now, **changes)
         await self._event(job, "cleanup_completed")
+        if closing:
+            await self._event(job, "job_closed")
 
     async def _event(
         self,

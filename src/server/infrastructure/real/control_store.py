@@ -11,6 +11,10 @@ from typing import Any
 from server.domain.entities import JobStatus
 
 
+class JobStateConflict(RuntimeError):
+    """A concurrent lifecycle command made the requested transition invalid."""
+
+
 @dataclass(frozen=True, slots=True)
 class ControlJob:
     job_id: str
@@ -53,7 +57,11 @@ class ControlJob:
 
     @property
     def terminal(self) -> bool:
-        return self.status in {JobStatus.SUCCEEDED.value, JobStatus.FAILED.value}
+        return self.status in {
+            JobStatus.SUCCEEDED.value,
+            JobStatus.FAILED.value,
+            JobStatus.CLOSED.value,
+        }
 
 
 JOB_COLUMNS = {field.name for field in fields(ControlJob)}
@@ -161,8 +169,12 @@ class SQLiteControlStore:
         async with self._lock:
             with self._connect() as connection:
                 rows = connection.execute(
-                    "SELECT * FROM jobs WHERE status NOT IN (?, ?) ORDER BY created_at",
-                    (JobStatus.SUCCEEDED.value, JobStatus.FAILED.value),
+                    "SELECT * FROM jobs WHERE status IN (?, ?, ?) ORDER BY created_at",
+                    (
+                        JobStatus.QUEUED.value,
+                        JobStatus.PREPARING.value,
+                        JobStatus.RUNNING.value,
+                    ),
                 ).fetchall()
         return tuple(ControlJob(**dict(row)) for row in rows)
 
@@ -173,6 +185,49 @@ class SQLiteControlStore:
                     "SELECT * FROM jobs WHERE cleanup_requested = 1 ORDER BY updated_at"
                 ).fetchall()
         return tuple(ControlJob(**dict(row)) for row in rows)
+
+    async def request_close(
+        self, job_id: str, *, now: datetime
+    ) -> tuple[ControlJob, bool]:
+        """Atomically move an active Job into closing.
+
+        The boolean is true only for the request that performed the transition,
+        allowing the caller to append one audit event for repeated close calls.
+        """
+        async with self._lock:
+            with self._connect() as connection:
+                current_row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                if current_row is None:
+                    raise KeyError(job_id)
+                current = ControlJob(**dict(current_row))
+                if current.status not in {
+                    JobStatus.QUEUED.value,
+                    JobStatus.PREPARING.value,
+                    JobStatus.RUNNING.value,
+                }:
+                    return current, False
+
+                timestamp = _timestamp(now)
+                cursor = connection.execute(
+                    "UPDATE jobs SET status = ?, phase = ?, cleanup_requested = 1, "
+                    "updated_at = ?, version = ? WHERE job_id = ? AND version = ?",
+                    (
+                        JobStatus.CLOSING.value,
+                        "cleaning_rjobs",
+                        timestamp,
+                        current.version + 1,
+                        job_id,
+                        current.version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("concurrent Job close detected")
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+        return ControlJob(**dict(row)), True
 
     async def update(self, job_id: str, *, now: datetime, **changes: Any) -> ControlJob:
         unknown = set(changes) - MUTABLE_COLUMNS
@@ -189,6 +244,14 @@ class SQLiteControlStore:
                 requested_status = changes.get("status", current.status)
                 if current.terminal and requested_status != current.status:
                     raise ValueError("terminal Job state is immutable")
+                if current.status == JobStatus.CLOSING.value:
+                    if requested_status not in {
+                        JobStatus.CLOSING.value,
+                        JobStatus.CLOSED.value,
+                    }:
+                        raise JobStateConflict("closing Job cannot resume execution")
+                    if requested_status == JobStatus.CLOSING.value:
+                        changes.pop("phase", None)
                 changes["updated_at"] = _timestamp(now)
                 assignments = ", ".join(f"{column} = ?" for column in changes)
                 parameters = [*changes.values(), current.version + 1, job_id, current.version]

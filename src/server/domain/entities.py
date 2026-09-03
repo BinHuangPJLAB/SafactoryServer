@@ -10,8 +10,10 @@ class JobStatus(StrEnum):
     QUEUED = "queued"
     PREPARING = "preparing"
     RUNNING = "running"
+    CLOSING = "closing"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CLOSED = "closed"
 
 
 class ResultStatus(StrEnum):
@@ -48,6 +50,14 @@ class CreatedJob:
     model_id: str
     range_id: str
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CloseJobResult:
+    job_id: str
+    job_status: JobStatus
+    updated_at: datetime
+    retry_after_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

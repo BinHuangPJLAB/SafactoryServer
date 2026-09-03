@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from server.domain.entities import (
+    CloseJobResult,
     CreatedJob,
     JobSessions,
     Model,
@@ -26,6 +27,8 @@ class CatalogPort(Protocol):
 
 class RuntimePort(Protocol):
     async def create_job(self, model_id: str, range_id: str) -> CreatedJob: ...
+
+    async def close_job(self, job_id: str) -> CloseJobResult: ...
 
     async def list_sessions(self, job_id: str) -> JobSessions: ...
 

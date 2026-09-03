@@ -27,7 +27,7 @@ from server.infrastructure.real.file_manager import (
     SharedFileManager,
 )
 from server.infrastructure.real.orchestrator import RealJobOrchestrator, _launcher_command
-from server.infrastructure.real.rjob import RJobSnapshot, RJobState
+from server.infrastructure.real.rjob import RJobDependencyError, RJobSnapshot, RJobState
 
 
 def test_orders_recovers_and_cleans_top_level_rjobs(tmp_path: Path, caplog) -> None:
@@ -57,6 +57,22 @@ def test_gateway_failure_never_submits_controller(tmp_path: Path) -> None:
 
 def test_keep_rjobs_skips_cleanup_after_failure(tmp_path: Path) -> None:
     asyncio.run(_exercise_gateway_failure(tmp_path, keep_rjobs=True))
+
+
+def test_close_queued_job_is_idempotent_and_recoverable(tmp_path: Path) -> None:
+    asyncio.run(_exercise_close_queued_job(tmp_path))
+
+
+def test_close_running_job_cleans_controller_before_gateway(tmp_path: Path) -> None:
+    asyncio.run(_exercise_close_running_job(tmp_path))
+
+
+def test_explicit_close_overrides_keep_rjobs(tmp_path: Path) -> None:
+    asyncio.run(_exercise_close_running_job(tmp_path, keep_rjobs=True))
+
+
+def test_close_retries_transient_cleanup_failure(tmp_path: Path) -> None:
+    asyncio.run(_exercise_close_running_job(tmp_path, fail_first_cleanup=True))
 
 
 def test_launcher_uses_range_specific_rjob_config() -> None:
@@ -223,6 +239,11 @@ async def _exercise_orchestrator(
     assert completed is not None
     assert completed.status == "succeeded"
     assert completed.cleanup_requested == 0
+    unchanged, close_transitioned = await store.request_close(
+        job.job_id, now=clock.now()
+    )
+    assert unchanged.status == "succeeded"
+    assert close_transitioned is False
     assert rjobs.stopped == (
         [] if keep_rjobs else ["rjob_controller", "rjob_gateway"]
     )
@@ -312,3 +333,170 @@ async def _exercise_gateway_failure(
         assert "rjob_cleanup_skipped" in {
             item["event_type"] for item in events
         }
+
+
+async def _exercise_close_queued_job(tmp_path: Path) -> None:
+    ranges = write_real_configs(tmp_path)
+    initialization = load_initialization_config(write_initialization_config(tmp_path))
+    settings = Settings(
+        auth_config_path=tmp_path / "unused-auth.yaml",
+        initialization_config_path=tmp_path / "initialization.yaml",
+        range_config_path=ranges,
+        control_db_path=tmp_path / "control.db",
+        shared_storage_root=tmp_path / "shared",
+        rjob_endpoint="https://rjob.invalid",
+    )
+    clock = FakeClock(current=datetime(2026, 9, 3, tzinfo=UTC))
+    catalog = RealCatalog(ranges, REAL_GATEWAY_ROUTES)
+    store = SQLiteControlStore(settings.control_db_path)
+    rjobs = FakeRJobClient()
+    orchestrator = RealJobOrchestrator(
+        settings=settings,
+        initialization=initialization,
+        catalog=catalog,
+        store=store,
+        files=SharedFileManager(settings.shared_storage_root, catalog),
+        rjobs=rjobs,
+        health=ReadyHealthChecker(),
+        clock=clock,
+    )
+    await orchestrator.preflight()
+    job = new_control_job(
+        job_id="job_close_queued",
+        request_id="req_test",
+        owner_username="test-user",
+        model_id="kimi-k3",
+        model_checksum=catalog.model_checksum(),
+        model_gateway_json=catalog.resolve_model("kimi-k3").gateway.model_dump_json(),
+        range_id="range_real_001",
+        gateway_image=initialization.gateway_base_image,
+        safactory_image=initialization.safactory_base_image,
+        now=clock.now(),
+    )
+    await store.add(job)
+
+    closing, transitioned = await store.request_close(job.job_id, now=clock.now())
+    repeated, transitioned_again = await store.request_close(job.job_id, now=clock.now())
+
+    assert closing.status == "closing"
+    assert closing.cleanup_requested == 1
+    assert transitioned is True
+    assert repeated == closing
+    assert transitioned_again is False
+
+    await orchestrator.reconcile_once()
+
+    closed = await store.get(job.job_id)
+    assert closed is not None
+    assert closed.status == "closed"
+    assert closed.terminal is True
+    assert closed.cleanup_requested == 0
+    assert closed.completed_at is not None
+    assert rjobs.created == []
+    assert rjobs.stopped == []
+    assert "job_closed" in {
+        event["event_type"] for event in await store.events(job.job_id)
+    }
+
+
+async def _exercise_close_running_job(
+    tmp_path: Path,
+    *,
+    keep_rjobs: bool = False,
+    fail_first_cleanup: bool = False,
+) -> None:
+    ranges = write_real_configs(tmp_path)
+    initialization = load_initialization_config(write_initialization_config(tmp_path))
+    settings = Settings(
+        auth_config_path=tmp_path / "unused-auth.yaml",
+        initialization_config_path=tmp_path / "initialization.yaml",
+        range_config_path=ranges,
+        control_db_path=tmp_path / "control.db",
+        shared_storage_root=tmp_path / "shared",
+        rjob_endpoint="https://rjob.invalid",
+        keep_rjobs=keep_rjobs,
+    )
+    clock = FakeClock(current=datetime(2026, 9, 3, tzinfo=UTC))
+    catalog = RealCatalog(ranges, REAL_GATEWAY_ROUTES)
+    store = SQLiteControlStore(settings.control_db_path)
+    rjobs = FakeRJobClient(
+        snapshots={
+            "rjob_gateway": RJobSnapshot(
+                "rjob_gateway",
+                RJobState.RUNNING,
+                ready=True,
+                address="gateway.jobs.svc",
+                port=8080,
+            ),
+            "rjob_controller": RJobSnapshot(
+                "rjob_controller", RJobState.RUNNING
+            ),
+        }
+    )
+    orchestrator = RealJobOrchestrator(
+        settings=settings,
+        initialization=initialization,
+        catalog=catalog,
+        store=store,
+        files=SharedFileManager(settings.shared_storage_root, catalog),
+        rjobs=rjobs,
+        health=ReadyHealthChecker(),
+        clock=clock,
+    )
+    await orchestrator.preflight()
+    job = new_control_job(
+        job_id="job_close_running",
+        request_id="req_test",
+        owner_username="test-user",
+        model_id="kimi-k3",
+        model_checksum=catalog.model_checksum(),
+        model_gateway_json=catalog.resolve_model("kimi-k3").gateway.model_dump_json(),
+        range_id="range_real_001",
+        gateway_image=initialization.gateway_base_image,
+        safactory_image=initialization.safactory_base_image,
+        now=clock.now(),
+    )
+    await store.add(job)
+    await orchestrator.reconcile_once()
+    running = await store.get(job.job_id)
+    assert running is not None
+    assert running.status == "running"
+
+    await store.request_close(job.job_id, now=clock.now())
+    original_stop = rjobs.stop
+    if fail_first_cleanup:
+        cleanup_failed = False
+
+        async def fail_once(rjob_id: str) -> None:
+            nonlocal cleanup_failed
+            if not cleanup_failed:
+                cleanup_failed = True
+                raise RJobDependencyError("temporary cleanup failure")
+            await original_stop(rjob_id)
+
+        rjobs.stop = fail_once
+    restarted = RealJobOrchestrator(
+        settings=settings,
+        initialization=initialization,
+        catalog=catalog,
+        store=store,
+        files=SharedFileManager(settings.shared_storage_root, catalog),
+        rjobs=rjobs,
+        health=ReadyHealthChecker(),
+        clock=clock,
+    )
+    await restarted.reconcile_once()
+
+    if fail_first_cleanup:
+        still_closing = await store.get(job.job_id)
+        assert still_closing is not None
+        assert still_closing.status == "closing"
+        assert still_closing.cleanup_requested == 1
+        rjobs.stop = original_stop
+        await restarted.reconcile_once()
+
+    closed = await store.get(job.job_id)
+    assert closed is not None
+    assert closed.status == "closed"
+    assert closed.cleanup_requested == 0
+    assert rjobs.stopped == ["rjob_controller", "rjob_gateway"]

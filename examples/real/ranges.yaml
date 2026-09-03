@@ -12,17 +12,53 @@ ranges:
         dataset: cyberrange/datasets/cyberrange_smoke.jsonl
         start_config: cyberrange/cyberrange_start.rjob.yaml
 
-  - range_id: range_cyberrange_full_001
-    description: CyberRange Range 3 至 Range 6 完整攻防评测
+  - range_id: range_cyberrange_range3_001
+    description: CyberRange Range 3 攻防评测
     available: true
     availability_retryable: false
-    agent_config: cyberrange/cyberrange_config.rjob.yaml
+    agent_config: cyberrange/cyberrange_config.range3.rjob.yaml
     groups:
       - env_name: cyberrange
         supports_milestones: true
         result_artifact: runtime-test-result.json
-        dataset: cyberrange/datasets/cyberrange_cases.jsonl
-        start_config: cyberrange/cyberrange_start.rjob.yaml
+        dataset: cyberrange/datasets/cyberrange_range3.jsonl
+        start_config: cyberrange/cyberrange_start.range3.rjob.yaml
+
+  - range_id: range_cyberrange_range4_001
+    description: CyberRange Range 4 攻防评测
+    available: true
+    availability_retryable: false
+    agent_config: cyberrange/cyberrange_config.range4.rjob.yaml
+    groups:
+      - env_name: cyberrange
+        supports_milestones: true
+        result_artifact: runtime-test-result.json
+        dataset: cyberrange/datasets/cyberrange_range4.jsonl
+        start_config: cyberrange/cyberrange_start.range4.rjob.yaml
+
+  - range_id: range_cyberrange_range5_001
+    description: CyberRange Range 5 攻防评测
+    available: true
+    availability_retryable: false
+    agent_config: cyberrange/cyberrange_config.range5.rjob.yaml
+    groups:
+      - env_name: cyberrange
+        supports_milestones: true
+        result_artifact: runtime-test-result.json
+        dataset: cyberrange/datasets/cyberrange_range5.jsonl
+        start_config: cyberrange/cyberrange_start.range5.rjob.yaml
+
+  - range_id: range_cyberrange_range6_001
+    description: CyberRange Range 6 攻防评测
+    available: true
+    availability_retryable: false
+    agent_config: cyberrange/cyberrange_config.range6.rjob.yaml
+    groups:
+      - env_name: cyberrange
+        supports_milestones: true
+        result_artifact: runtime-test-result.json
+        dataset: cyberrange/datasets/cyberrange_range6.jsonl
+        start_config: cyberrange/cyberrange_start.range6.rjob.yaml
 
   - range_id: range_harbor_vulhub_claude_kimi_all_001
     description: Harbor Vulhub 漏洞任务完整评测

@@ -5,6 +5,7 @@ from typing import Any
 
 from server.application.ports import CatalogPort, RuntimePort
 from server.domain.entities import (
+    CloseJobResult,
     CreatedJob,
     JobSessions,
     Model,
@@ -62,6 +63,9 @@ class JobService:
                 retryable=range_config.availability_retryable,
             )
         return await self._runtime.create_job(model_id, range_id)
+
+    async def close_job(self, job_id: str) -> CloseJobResult:
+        return await self._runtime.close_job(job_id)
 
     async def list_sessions(self, job_id: str) -> JobSessions:
         return await self._runtime.list_sessions(job_id)

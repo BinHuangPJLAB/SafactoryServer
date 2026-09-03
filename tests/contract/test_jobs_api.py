@@ -58,3 +58,39 @@ def test_requested_model_is_not_restricted_by_the_range(client: TestClient) -> N
 
     assert response.status_code == 202
     assert response.json()["model_id"] == "qwen-max"
+
+
+def test_close_job_is_async_and_idempotent(
+    client: TestClient, created_job: dict[str, str]
+) -> None:
+    job_id = created_job["job_id"]
+
+    first = client.post("/v1/jobs/close", params={"job_id": job_id})
+
+    assert first.status_code == 202
+    assert first.json()["job_id"] == job_id
+    assert first.json()["job_status"] == "closing"
+    assert first.json()["updated_at"].endswith("Z")
+    assert first.headers["Location"] == f"/v1/jobs/sessions?job_id={job_id}"
+    assert int(first.headers["Retry-After"]) > 0
+
+    repeated = client.post("/v1/jobs/close", params={"job_id": job_id})
+    assert repeated.status_code in {200, 202}
+    assert repeated.json()["job_status"] in {"closing", "closed"}
+
+
+def test_close_unknown_job_is_not_found(client: TestClient) -> None:
+    response = client.post("/v1/jobs/close", params={"job_id": "job_unknown"})
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "JOB_NOT_FOUND"
+
+
+def test_close_contract_is_exposed_in_openapi(client: TestClient) -> None:
+    document = client.get("/openapi.json").json()
+    operation = document["paths"]["/v1/jobs/close"]["post"]
+
+    assert {"200", "202"}.issubset(operation["responses"])
+    assert {"closing", "closed"}.issubset(
+        document["components"]["schemas"]["JobStatus"]["enum"]
+    )
