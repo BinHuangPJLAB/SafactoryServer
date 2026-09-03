@@ -16,6 +16,7 @@ from server.domain.entities import (
     JobSessions,
     JobStatus,
     MilestoneStatus,
+    ResultStatus,
     SessionMilestones,
     SessionResult,
     SessionSteps,
@@ -170,6 +171,7 @@ class RealRuntimeRepository:
                 ErrorCode.SESSION_NOT_FOUND,
                 {"job_id": job_id, "session_id": session_id},
             )
+        result = _reconcile_result_with_job(result, JobStatus(job.status))
 
         try:
             range_config = self._catalog.resolve_range(job.range_id)
@@ -204,14 +206,14 @@ class RealRuntimeRepository:
                         ErrorCode.DEPENDENCY_UNAVAILABLE,
                         {"job_id": job_id, "session_id": session_id},
                     ) from exc
-            if payload is None and result.result_status.value in {"succeeded", "failed"}:
+            if payload is None and result.result_status == ResultStatus.SUCCEEDED:
                 raise DomainError(
                     ErrorCode.DEPENDENCY_UNAVAILABLE,
                     {"job_id": job_id, "session_id": session_id},
                 )
             result = replace(result, result=payload)
 
-        if result.result_status.value in {"pending", "running"}:
+        if result.result_status in {ResultStatus.PENDING, ResultStatus.RUNNING}:
             return replace(result, retry_after_seconds=self._retry_after_seconds)
         return result
 
@@ -351,6 +353,51 @@ class RealRuntimeRepository:
             self._clock.now(),
             {"operation": operation},
         )
+
+
+def _reconcile_result_with_job(
+    result: SessionResult,
+    job_status: JobStatus,
+) -> SessionResult:
+    if result.result_status not in {ResultStatus.PENDING, ResultStatus.RUNNING}:
+        return result
+
+    failure = None
+    result_status = (
+        ResultStatus.PENDING
+        if job_status in {JobStatus.QUEUED, JobStatus.PREPARING}
+        else ResultStatus.RUNNING
+    )
+    failure_details = {
+        JobStatus.FAILED: (
+            "JOB_EXECUTION_FAILED",
+            "The session did not complete because the job failed.",
+        ),
+        JobStatus.CLOSED: (
+            "SESSION_CANCELLED",
+            "The session was cancelled because the job was closed.",
+        ),
+        JobStatus.SUCCEEDED: (
+            "SESSION_RESULT_INCOMPLETE",
+            "The session did not publish a completed result before the job succeeded.",
+        ),
+    }.get(job_status)
+    if failure_details is not None:
+        result_status = ResultStatus.FAILED
+        failure = FailureInfo(
+            code=failure_details[0],
+            message=failure_details[1],
+            details={},
+            retryable=False,
+        )
+    return replace(
+        result,
+        result_status=result_status,
+        score=None,
+        completed_at=None,
+        result=None,
+        error=failure,
+    )
 
 
 def _read_milestone_snapshot(

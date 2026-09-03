@@ -481,7 +481,8 @@ HTTP/1.1 200 OK
 
 `result` 内部字段由具体环境定义，服务端不改名或展开这些字段。未配置
 `result_artifact` 时不返回 `result`。运行中的 Session 尚未生成结果文件时，也暂不返回
-`result`，调用方继续根据 `Retry-After` 轮询。
+`result`，调用方继续根据 `Retry-After` 轮询。`succeeded` Session 配置的结果文件缺失或
+非法时返回 `503 DEPENDENCY_UNAVAILABLE`；`failed` Session 的结果文件允许缺失。
 
 字段说明：
 
@@ -493,6 +494,16 @@ HTTP/1.1 200 OK
 | `completed_at` | string/null | 是 | 结果完成时间 |
 | `result` | object | 否 | `ranges.yaml` 配置的环境结果 JSON，内部结构由环境定义 |
 | `error` | object | 否 | `result_status=failed` 时的失败原因 |
+
+状态合并约束：
+
+- 数据平台已经返回 `succeeded` 或 `failed` 时，保留 Session 自身终态，不使用 Job 状态覆盖；
+- 数据平台返回 `pending` 或 `running` 时，使用 Job 状态二次确认：`queued/preparing` 返回
+  `pending`，`running/closing` 返回 `running`；
+- 非终态 Session 所属 Job 已 `failed` 时返回 `failed` 和 `JOB_EXECUTION_FAILED`；Job 已
+  `closed` 时返回 `failed` 和 `SESSION_CANCELLED`；
+- Job 已 `succeeded` 但 Session 仍为非终态时返回 `failed` 和
+  `SESSION_RESULT_INCOMPLETE`，不得伪造 Session 成功结果。
 
 ### 状态码
 

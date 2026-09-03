@@ -85,6 +85,7 @@ class SessionResult:
     completed_at: datetime | None
     retry_after_seconds: int | None = None
     result: dict[str, Any] | None = None
+    error: FailureInfo | None = None
 
 
 @dataclass(frozen=True, slots=True)
